@@ -1,6 +1,6 @@
 # TODO
 
-- [ ] **1.** Get the Minecraft source for 26.2 with the mappings baked in—easily editable. Source must include code and assets so we can do textures.
+- [x] **1.** Get the Minecraft source for 26.2 with the mappings baked in—easily editable. Source must include code and assets so we can do textures.
 - [ ] **2.** Get it running under our custom JVM / what is right for this: DCEVM—Dynamic Code Evolution VM, but you mentioned JetBrains JVM later?
 - [ ] **3.** Update our source directly so that:
   - [ ] **3.1.** Every world in `saves/` gets a clone of the source in `saves/<world>/source` and a patch list in `saves/<world>/patches`.
