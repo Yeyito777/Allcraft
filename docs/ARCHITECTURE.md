@@ -105,7 +105,7 @@ patches/
 
 Clients never run a Java build when joining or receiving an update.
 
-Actual class redefinition still requires a short JVM safepoint. JBR 25's DCEVM path also has a C2 bug around `Entity.move`; the launcher keeps C2 enabled globally but routes that one method through C1 and enables selective code flushing.
+Actual class redefinition still requires a short JVM safepoint. The bundled Allcraft JBR uses selective code flushing and keeps normal tiered compilation and C2 enabled globally during arbitrary evolution.
 
 ## Revision and cache strategy
 

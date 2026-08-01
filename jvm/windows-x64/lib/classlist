@@ -2718,6 +2718,7 @@ sun/nio/cs/DoubleByte$Decoder_DBCSONLY
 sun/nio/cs/DoubleByte$Encoder
 sun/nio/cs/DoubleByte$Encoder_DBCSONLY
 sun/nio/cs/HistoricallyNamedCharset
+sun/nio/cs/IBM437
 sun/nio/cs/IBM850
 sun/nio/cs/ISO_8859_1
 sun/nio/cs/ISO_8859_1$Decoder

@@ -1,0 +1,3 @@
+[submodule "jvm/source"]
+	path = jvm/source
+	url = https://github.com/JetBrains/JetBrainsRuntime.git

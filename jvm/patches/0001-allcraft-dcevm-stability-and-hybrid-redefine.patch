@@ -1,0 +1,273 @@
+diff --git a/src/hotspot/share/ci/ciMethod.cpp b/src/hotspot/share/ci/ciMethod.cpp
+index d3b8b8f13..6a809e621 100644
+--- a/src/hotspot/share/ci/ciMethod.cpp
++++ b/src/hotspot/share/ci/ciMethod.cpp
+@@ -746,7 +746,13 @@ ciMethod* ciMethod::find_monomorphic_target(ciInstanceKlass* caller,
+ 
+   // Redefinition support.
+   if (this->is_old() || root_m->is_old() || target->is_old()) {
+-    guarantee(CURRENT_THREAD_ENV->jvmti_state_changed(), "old method not detected");
++    // Enhanced redefinition replaces the InstanceKlass and deliberately keeps
++    // old Method metadata alive. A compilation started after the redefine has
++    // already cached the new JVMTI generation, so jvmti_state_changed() is
++    // false even though CHA can conservatively encounter an old method.
++    // Decline the optimization instead of aborting the VM.
++    guarantee(AllowEnhancedClassRedefinition || CURRENT_THREAD_ENV->jvmti_state_changed(),
++              "old method not detected");
+     return nullptr;
+   }
+ 
+@@ -829,7 +835,8 @@ ciMethod* ciMethod::resolve_invoke(ciKlass* caller, ciKlass* exact_receiver, boo
+   if (m != get_Method()) {
+     // Redefinition support.
+     if (this->is_old() || m->is_old()) {
+-      guarantee(CURRENT_THREAD_ENV->jvmti_state_changed(), "old method not detected");
++      guarantee(AllowEnhancedClassRedefinition || CURRENT_THREAD_ENV->jvmti_state_changed(),
++                "old method not detected");
+       return nullptr;
+     }
+ 
+diff --git a/src/hotspot/share/classfile/javaClasses.cpp b/src/hotspot/share/classfile/javaClasses.cpp
+index 360fe7ec3..da765acad 100644
+--- a/src/hotspot/share/classfile/javaClasses.cpp
++++ b/src/hotspot/share/classfile/javaClasses.cpp
+@@ -4632,9 +4632,8 @@ oop java_lang_invoke_ResolvedMethodName::find_resolved_method(const methodHandle
+ 
+   NoSafepointVerifier nsv;
+ 
+-  if (method->is_old()) {
+-    method = (method->is_deleted()) ? Universe::throw_no_such_method_error() :
+-                                      method->get_new_method();
++  if (method->is_old() && !method->is_deleted()) {
++    method = method->get_new_method();
+   }
+ 
+   InstanceKlass* holder = method->method_holder();
+diff --git a/src/hotspot/share/jfr/recorder/jfrRecorder.cpp b/src/hotspot/share/jfr/recorder/jfrRecorder.cpp
+index 5365c93d2..d8f34d167 100644
+--- a/src/hotspot/share/jfr/recorder/jfrRecorder.cpp
++++ b/src/hotspot/share/jfr/recorder/jfrRecorder.cpp
+@@ -71,7 +71,6 @@ static bool enable() {
+   }
+   _enabled = FlightRecorder;
+   assert(_enabled, "invariant");
+-  AllowEnhancedClassRedefinition = false;
+   return _enabled;
+ }
+ 
+diff --git a/src/hotspot/share/oops/cpCache.cpp b/src/hotspot/share/oops/cpCache.cpp
+index 63695ab73..bd0f9e431 100644
+--- a/src/hotspot/share/oops/cpCache.cpp
++++ b/src/hotspot/share/oops/cpCache.cpp
+@@ -890,7 +890,9 @@ void ConstantPoolCache::clear_entries() {
+       ResolvedMethodEntry *method_entry = resolved_method_entry_at(i);
+       Method* old_method = method_entry->method();
+       if (old_method != nullptr && old_method->is_old() && old_method->is_deleted()) {
+-        method_entry->reset_entry();
++        // This cache belongs to already-linked bytecode from the old live
++        // generation. Keep its deleted target executable; newly linked code
++        // resolves against the evolved class and cannot discover the method.
+         continue;
+       }
+       method_entry->clear_entry();
+diff --git a/src/hotspot/share/prims/jvmtiEnv.cpp b/src/hotspot/share/prims/jvmtiEnv.cpp
+index de143db33..19d55fba7 100644
+--- a/src/hotspot/share/prims/jvmtiEnv.cpp
++++ b/src/hotspot/share/prims/jvmtiEnv.cpp
+@@ -92,6 +92,22 @@
+ 
+ static volatile int _active_redefinitions = 0;
+ 
++static bool retry_with_enhanced_redefinition(jvmtiError error) {
++  switch (error) {
++    case JVMTI_ERROR_UNMODIFIABLE_CLASS:
++    case JVMTI_ERROR_UNSUPPORTED_REDEFINITION_METHOD_ADDED:
++    case JVMTI_ERROR_UNSUPPORTED_REDEFINITION_SCHEMA_CHANGED:
++    case JVMTI_ERROR_UNSUPPORTED_REDEFINITION_HIERARCHY_CHANGED:
++    case JVMTI_ERROR_UNSUPPORTED_REDEFINITION_METHOD_DELETED:
++    case JVMTI_ERROR_UNSUPPORTED_REDEFINITION_CLASS_MODIFIERS_CHANGED:
++    case JVMTI_ERROR_UNSUPPORTED_REDEFINITION_METHOD_MODIFIERS_CHANGED:
++    case JVMTI_ERROR_UNSUPPORTED_REDEFINITION_CLASS_ATTRIBUTE_CHANGED:
++      return true;
++    default:
++      return false;
++  }
++}
++
+ JvmtiEnv::JvmtiEnv(jint version) : JvmtiEnvBase(version) {
+ }
+ 
+@@ -497,24 +513,26 @@ JvmtiEnv::RetransformClasses(jint class_count, const jclass* classes) {
+   jvmtiError error;
+   u8 op_id;
+ 
+-  if (AllowEnhancedClassRedefinition) {
+-    // MutexLocker sd_mutex(EnhancedRedefineClasses_lock, Monitor::_no_safepoint_check_flag);
+-    // Stop compilation to avoid compilator race condition (crashes) with advanced redefinition
++  // Use standard HotSpot for schema-compatible retransforms. It is faster,
++  // preserves the InstanceKlass, and avoids paying DCEVM's structural machinery
++  // for ordinary method-body changes. Retry atomically with DCEVM only when the
++  // standard operation reports a structural limitation.
++  VM_RedefineClasses standard_op(class_count, class_definitions, jvmti_class_load_kind_retransform);
++  VMThread::execute(&standard_op);
++  op_id = standard_op.id();
++  error = standard_op.check_error();
++
++  if (AllowEnhancedClassRedefinition && retry_with_enhanced_redefinition(error)) {
+     Atomic::add(&_active_redefinitions, 1);
+     CompileBroker::stopCompilationBeforeEnhancedRedefinition();
+-    VM_EnhancedRedefineClasses op(class_count, class_definitions, jvmti_class_load_kind_retransform);
+-    VMThread::execute(&op);
++    VM_EnhancedRedefineClasses enhanced_op(class_count, class_definitions, jvmti_class_load_kind_retransform);
++    VMThread::execute(&enhanced_op);
+     Atomic::sub(&_active_redefinitions, 1);
+     if (_active_redefinitions == 0) {
+       CompileBroker::releaseCompilationAfterEnhancedRedefinition();
+     }
+-    op_id = op.id();
+-    error = (op.check_error());
+-  } else {
+-    VM_RedefineClasses op(class_count, class_definitions, jvmti_class_load_kind_retransform);
+-    VMThread::execute(&op);
+-    op_id = op.id();
+-    error = op.check_error();
++    op_id = enhanced_op.id();
++    error = enhanced_op.check_error();
+   }
+   if (error == JVMTI_ERROR_NONE) {
+     event.set_classCount(class_count);
+@@ -580,20 +598,20 @@ JvmtiEnv::RedefineClasses(jint class_count, const jvmtiClassDefinition* class_de
+ 
+   u8 op_id;
+ 
+-  if (AllowEnhancedClassRedefinition) {
+-    // MutexLocker sd_mutex(EnhancedRedefineClasses_lock, Monitor::_no_safepoint_check_flag);
+-    // Stop compilation to avoid compilator race condition (crashes) with advanced redefinition
++  // Prefer standard HotSpot for schema-compatible definitions and fall back to
++  // enhanced redefinition only for structural evolution.
++  VM_RedefineClasses standard_op(class_count, class_definitions, jvmti_class_load_kind_redefine);
++  VMThread::execute(&standard_op);
++  op_id = standard_op.id();
++  error = standard_op.check_error();
++
++  if (AllowEnhancedClassRedefinition && retry_with_enhanced_redefinition(error)) {
+     CompileBroker::stopCompilationBeforeEnhancedRedefinition();
+-    VM_EnhancedRedefineClasses op(class_count, class_definitions, jvmti_class_load_kind_redefine);
+-    VMThread::execute(&op);
++    VM_EnhancedRedefineClasses enhanced_op(class_count, class_definitions, jvmti_class_load_kind_redefine);
++    VMThread::execute(&enhanced_op);
+     CompileBroker::releaseCompilationAfterEnhancedRedefinition();
+-    op_id = op.id();
+-    error = (op.check_error());
+-  } else {
+-    VM_RedefineClasses op(class_count, class_definitions, jvmti_class_load_kind_redefine);
+-    VMThread::execute(&op);
+-    op_id = op.id();
+-    error = op.check_error();
++    op_id = enhanced_op.id();
++    error = enhanced_op.check_error();
+   }
+   if (error == JVMTI_ERROR_NONE) {
+     event.set_classCount(class_count);
+diff --git a/src/hotspot/share/prims/resolvedMethodTable.cpp b/src/hotspot/share/prims/resolvedMethodTable.cpp
+index d8ab029ce..6416cf4e8 100644
+--- a/src/hotspot/share/prims/resolvedMethodTable.cpp
++++ b/src/hotspot/share/prims/resolvedMethodTable.cpp
+@@ -427,34 +427,36 @@ void ResolvedMethodTable::adjust_method_entries_dcevm(bool * trace_name_printed)
+     oop mem_name = oops_to_update.at(i);
+     Method *old_method = old_methods.at(i);
+ 
++    // Existing MethodHandles and lambda objects are part of the old live code
++    // generation. Keep their resolved target executable when a method is
++    // deleted; new lookups use the evolved class and cannot discover it.
++    if (old_method->is_deleted()) {
++      log_debug(redefine, class, update)("Preserving live handle to deleted method: '%s'",
++                                         old_method->name_and_sig_as_C_string());
++      continue;
++    }
++
+     // 1. Remove old method, since we are going to update class that could be used for hash evaluation in parallel running ServiceThread
+     ResolvedMethodTableLookup lookup(thread, method_hash(old_method), old_method);
+     _local_table->remove(thread, lookup);
+ 
+     InstanceKlass* newer_klass = InstanceKlass::cast(old_method->method_holder()->newest_version());
+-    Method* newer_method = nullptr;
++    Method* newer_method = newer_klass->method_with_idnum(old_method->orig_method_idnum());
+ 
+-    // Method* new_method;
+-    if (old_method->is_deleted()) {
+-      newer_method = Universe::throw_no_such_method_error();
+-    } else {
+-      newer_method = newer_klass->method_with_idnum(old_method->orig_method_idnum());
+-
+-      // TODO: JBR21 - check why the newer_method can be nullptr
+-      // assert(newer_method != nullptr, "method_with_idnum() should not be nullptr");
++    // TODO: JBR21 - check why the newer_method can be nullptr
++    // assert(newer_method != nullptr, "method_with_idnum() should not be nullptr");
+ 
+-      if (newer_method != nullptr) {
+-        assert(newer_klass == newer_method->method_holder(), "call after swapping redefined guts");
+-        assert(old_method != newer_method, "sanity check");
++    if (newer_method != nullptr) {
++      assert(newer_klass == newer_method->method_holder(), "call after swapping redefined guts");
++      assert(old_method != newer_method, "sanity check");
+ 
+-        Thread *thread = Thread::current();
+-        ResolvedMethodTableLookup lookup(thread, method_hash(newer_method), newer_method);
+-        ResolvedMethodGet rmg(thread, newer_method);
++      Thread *thread = Thread::current();
++      ResolvedMethodTableLookup lookup(thread, method_hash(newer_method), newer_method);
++      ResolvedMethodGet rmg(thread, newer_method);
+ 
+-        if (_local_table->get(thread, lookup, rmg)) {
+-          // old method was already adjusted if new method exists in _the_table
+-          continue;
+-        }
++      if (_local_table->get(thread, lookup, rmg)) {
++        // old method was already adjusted if new method exists in _the_table
++        continue;
+       }
+     }
+ 
+@@ -495,7 +497,7 @@ class VerifyResolvedMethod : StackObj {
+     if (obj != nullptr) {
+       Method* method = (Method*)java_lang_invoke_ResolvedMethodName::vmtarget(obj);
+       guarantee(method->is_method(), "Must be");
+-      guarantee(!method->is_old(), "Must be");
++      guarantee(!method->is_old() || method->is_deleted(), "Must be current or a live deleted-generation target");
+     }
+     return true;
+   };
+diff --git a/src/hotspot/share/runtime/arguments.cpp b/src/hotspot/share/runtime/arguments.cpp
+index 00dd260c7..c8062f2be 100644
+--- a/src/hotspot/share/runtime/arguments.cpp
++++ b/src/hotspot/share/runtime/arguments.cpp
+@@ -3758,15 +3758,6 @@ jint Arguments::parse(const JavaVMInitArgs* initial_cmd_args) {
+   // Set object alignment values.
+   set_object_alignment();
+ 
+-#if INCLUDE_JFR
+-  if (FlightRecorder) {
+-    if (AllowEnhancedClassRedefinition || StartFlightRecording != nullptr) {
+-      warning("EnhancedClassRedefinition was disabled, it is not allowed in FlightRecorder.");
+-      AllowEnhancedClassRedefinition = false;
+-    }
+-  }
+-#endif
+-
+   setup_hotswap_agent();
+ 
+   if (AllowEnhancedClassRedefinition) {
+diff --git a/src/hotspot/share/runtime/globals.hpp b/src/hotspot/share/runtime/globals.hpp
+index e1bd68fbb..fd18a05f4 100644
+--- a/src/hotspot/share/runtime/globals.hpp
++++ b/src/hotspot/share/runtime/globals.hpp
+@@ -2030,7 +2030,7 @@ const int ObjectAlignmentInBytes = 8;
+              "Allow enhanced class redefinition beyond swapping method "    \
+              "bodies")                                                      \
+                                                                             \
+-  product(bool, OptimizeCodeFlush, false,                                   \
++  product(bool, OptimizeCodeFlush, true,                                    \
+           "Optimize code flush after enhanced class redefinition "          \
+           "by invalidating only affected code")                             \
+                                                                             \
