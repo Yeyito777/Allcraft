@@ -16,7 +16,7 @@ public record ServerboundCustomPayloadPacket(CustomPacketPayload payload) implem
    public static final StreamCodec<FriendlyByteBuf, ServerboundCustomPayloadPacket> STREAM_CODEC = CustomPacketPayload.<FriendlyByteBuf>codec(
          id -> DiscardedPayload.codec(id, 32767),
          Util.make(
-            Lists.newArrayList(new CustomPacketPayload.TypeAndCodec[]{new CustomPacketPayload.TypeAndCodec<>(BrandPayload.TYPE, BrandPayload.STREAM_CODEC)}),
+            Lists.newArrayList(new CustomPacketPayload.TypeAndCodec<>(BrandPayload.TYPE, BrandPayload.STREAM_CODEC)),
             types -> types.add(new CustomPacketPayload.TypeAndCodec<>(AllcraftPayloads.PatchAck.TYPE, AllcraftPayloads.PatchAck.STREAM_CODEC))
          )
       )

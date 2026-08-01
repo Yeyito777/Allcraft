@@ -33,6 +33,7 @@ public final class AllcraftPayloads {
         long revision,
         String testName,
         int step,
+        int totalSteps,
         int chunkIndex,
         int chunkCount,
         String sha256,
@@ -53,6 +54,7 @@ public final class AllcraftPayloads {
                 input.readVarInt(),
                 input.readVarInt(),
                 input.readVarInt(),
+                input.readVarInt(),
                 input.readUtf(64),
                 input.readByteArray(MAX_CHUNK_BYTES)
             );
@@ -65,6 +67,7 @@ public final class AllcraftPayloads {
             output.writeVarLong(this.revision);
             output.writeUtf(this.testName, 32);
             output.writeVarInt(this.step);
+            output.writeVarInt(this.totalSteps);
             output.writeVarInt(this.chunkIndex);
             output.writeVarInt(this.chunkCount);
             output.writeUtf(this.sha256, 64);
@@ -85,6 +88,7 @@ public final class AllcraftPayloads {
         long revision,
         String testName,
         int step,
+        int totalSteps,
         long activationTick,
         String sha256
     ) implements CustomPacketPayload {
@@ -102,6 +106,7 @@ public final class AllcraftPayloads {
                 input.readVarLong(),
                 input.readUtf(32),
                 input.readVarInt(),
+                input.readVarInt(),
                 input.readVarLong(),
                 input.readUtf(64)
             );
@@ -115,6 +120,7 @@ public final class AllcraftPayloads {
             output.writeVarLong(this.revision);
             output.writeUtf(this.testName, 32);
             output.writeVarInt(this.step);
+            output.writeVarInt(this.totalSteps);
             output.writeVarLong(this.activationTick);
             output.writeUtf(this.sha256, 64);
         }

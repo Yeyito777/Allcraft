@@ -364,6 +364,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
       this.clockManager.init(this);
       this.customBossEvents = this.savedDataStorage.computeIfAbsent(CustomBossEvents.TYPE);
       this.scheduledEvents = this.savedDataStorage.computeIfAbsent(TimerQueue.TYPE);
+      AllcraftPatchServer.restoreWorldArtifacts(storageSource.getLevelPath(LevelResource.ROOT));
    }
 
    protected abstract boolean initServer() throws IOException;

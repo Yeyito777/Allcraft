@@ -89,6 +89,16 @@ patches/
 - May contain changed/new classes, assets, sounds, models, shaders, and data.
 - Include a manifest describing their base, parent revision, contents, and hash.
 
+### Runtime class application
+
+- The bundled Allcraft Java agent exposes JVM `Instrumentation`.
+- Loaded classes are atomically redefined with JetBrains Runtime enhanced class redefinition.
+- New classes are appended to Minecraft's system classloader and loaded without restarting the game.
+- Optional static artifact entrypoints can initialize newly added code at activation.
+- Before a world revision is activated, the server compiles its authoritative world source into separate client and server JARs.
+- At tick `N`, the server applies its server JAR and clients apply the corresponding client JAR.
+- Opening an evolved single-player world restores its ordered server and integrated-client artifacts automatically.
+
 Clients never run a Java build when joining or receiving an update.
 
 ## Revision and cache strategy

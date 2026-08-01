@@ -6,6 +6,7 @@ build_dir="$repo_root/build"
 java="$repo_root/jvm/linux-x64/bin/java"
 classpath_file="$build_dir/runtime-classpath.txt"
 jar="$build_dir/allcraft-26.2.jar"
+agent="$build_dir/allcraft-agent.jar"
 assets="$build_dir/assets"
 game_dir="$build_dir/run"
 log="$build_dir/logs/client-runtime.log"
@@ -16,6 +17,10 @@ for required in "$java" "$classpath_file" "$jar" "$assets/indexes/32.json"; do
         exit 1
     fi
 done
+
+if [[ ! -e "$agent" || "$jar" -nt "$agent" ]]; then
+    "$repo_root/scripts/linux/build-agent.sh"
+fi
 
 mkdir -p \
     "$game_dir" \
@@ -30,6 +35,7 @@ cd "$game_dir"
 exec "$java" \
     -Xms512M \
     -Xmx4G \
+    -javaagent:"$agent" \
     -XX:+AllowEnhancedClassRedefinition \
     --sun-misc-unsafe-memory-access=allow \
     --enable-native-access=ALL-UNNAMED \

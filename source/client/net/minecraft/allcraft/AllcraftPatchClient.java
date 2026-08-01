@@ -49,7 +49,12 @@ public final class AllcraftPatchClient {
         try {
             PatchKey key = PatchKey.from(payload.serverId(), payload.worldId(), payload.patchId(), payload.revision());
             validateHash(payload.sha256());
-            if (payload.step() < 1 || payload.step() > 5 || payload.chunkCount() < 1 || payload.chunkCount() > 256) {
+            if (payload.totalSteps() < 1
+                || payload.totalSteps() > 1000
+                || payload.step() < 1
+                || payload.step() > payload.totalSteps()
+                || payload.chunkCount() < 1
+                || payload.chunkCount() > 256) {
                 throw new IOException("Invalid patch chunk metadata");
             }
 
@@ -58,7 +63,8 @@ public final class AllcraftPatchClient {
             }
 
             IncomingPatch incoming = INCOMING.computeIfAbsent(
-                key, ignored -> new IncomingPatch(payload.testName(), payload.step(), payload.chunkCount(), payload.sha256())
+                key,
+                ignored -> new IncomingPatch(payload.testName(), payload.step(), payload.totalSteps(), payload.chunkCount(), payload.sha256())
             );
             incoming.accept(payload);
             if (!incoming.complete()) {
@@ -70,12 +76,21 @@ public final class AllcraftPatchClient {
                 throw new IOException("Patch SHA-256 mismatch");
             }
 
-            Path artifactPath = cacheArtifact(key, payload.testName(), payload.step(), payload.sha256(), artifact);
+            Path artifactPath = cacheArtifact(key, payload.testName(), payload.step(), payload.totalSteps(), payload.sha256(), artifact);
             INCOMING.remove(key);
             STAGED.put(key, artifactPath);
             sendAck(connection, payload, AllcraftPayloads.AckStatus.READY, "cached " + artifact.length + " bytes");
             minecraft.showDebugChat(
-                Component.literal("[Allcraft] READY " + payload.testName() + " " + payload.step() + "/5, revision " + payload.revision())
+                Component.literal(
+                        "[Allcraft] READY "
+                            + payload.testName()
+                            + " "
+                            + payload.step()
+                            + "/"
+                            + payload.totalSteps()
+                            + ", revision "
+                            + payload.revision()
+                    )
                     .withStyle(ChatFormatting.DARK_GRAY)
             );
         } catch (Exception e) {
@@ -102,7 +117,9 @@ public final class AllcraftPatchClient {
                                 + payload.testName()
                                 + " "
                                 + payload.step()
-                                + "/5 for server tick "
+                                + "/"
+                                + payload.totalSteps()
+                                + " for server tick "
                                 + payload.activationTick()
                         )
                         .withStyle(ChatFormatting.GRAY)
@@ -115,11 +132,17 @@ public final class AllcraftPatchClient {
                 throw new IOException("Patch activation did not match its schedule");
             }
 
+            AllcraftRuntime.ApplyResult runtimeResult = AllcraftRuntime.apply(artifact, payload.sha256());
             applyTestArtifact(minecraft, artifact, payload);
             writeCurrentRevision(key, payload, artifact);
-            appendResult(key, payload, artifact);
+            appendResult(key, payload, artifact, runtimeResult);
             STAGED.remove(key);
-            sendAck(connection, payload, AllcraftPayloads.AckStatus.APPLIED, "applied at server tick " + payload.activationTick());
+            sendAck(
+                connection,
+                payload,
+                AllcraftPayloads.AckStatus.APPLIED,
+                "applied at server tick " + payload.activationTick() + ": " + runtimeResult.summary()
+            );
         } catch (Exception e) {
             LOGGER.error("Failed to activate Allcraft patch {}", payload.patchId(), e);
             sendAck(connection, payload, AllcraftPayloads.AckStatus.FAILED, conciseMessage(e));
@@ -127,7 +150,7 @@ public final class AllcraftPatchClient {
         }
     }
 
-    private static Path cacheArtifact(PatchKey key, String testName, int step, String hash, byte[] artifact) throws IOException {
+    private static Path cacheArtifact(PatchKey key, String testName, int step, int totalSteps, String hash, byte[] artifact) throws IOException {
         Path root = cacheRoot(key);
         Path revisions = root.resolve("revisions");
         Path manifests = root.resolve("manifests");
@@ -144,6 +167,7 @@ public final class AllcraftPatchClient {
         manifest.addProperty("revision", key.revision());
         manifest.addProperty("testName", testName);
         manifest.addProperty("step", step);
+        manifest.addProperty("totalSteps", totalSteps);
         manifest.addProperty("sha256", hash);
         manifest.addProperty("size", artifact.length);
         manifest.addProperty("cachedAt", Instant.now().toString());
@@ -167,7 +191,17 @@ public final class AllcraftPatchClient {
         String display = testPatch.get("display").getAsString();
         String message = testPatch.get("message").getAsString();
         Component component = Component.literal(
-                "[Allcraft " + control.testName() + " " + control.step() + "/5] " + message + " (revision " + control.revision() + ")"
+                "[Allcraft "
+                    + control.testName()
+                    + " "
+                    + control.step()
+                    + "/"
+                    + control.totalSteps()
+                    + "] "
+                    + message
+                    + " (revision "
+                    + control.revision()
+                    + ")"
             )
             .withStyle(ChatFormatting.AQUA);
 
@@ -197,17 +231,23 @@ public final class AllcraftPatchClient {
         writeJsonAtomically(cacheRoot(key).resolve("current.json"), current);
     }
 
-    private static void appendResult(PatchKey key, AllcraftPayloads.PatchControl control, Path artifact) throws IOException {
+    private static void appendResult(
+        PatchKey key, AllcraftPayloads.PatchControl control, Path artifact, AllcraftRuntime.ApplyResult runtimeResult
+    ) throws IOException {
         Path results = cacheRoot(key).resolve("test-results");
         Files.createDirectories(results);
         JsonObject result = new JsonObject();
         result.addProperty("testName", control.testName());
         result.addProperty("step", control.step());
+        result.addProperty("totalSteps", control.totalSteps());
         result.addProperty("revision", control.revision());
         result.addProperty("patchId", control.patchId());
         result.addProperty("activationTick", control.activationTick());
         result.addProperty("sha256", control.sha256());
         result.addProperty("artifact", artifact.getFileName().toString());
+        result.addProperty("redefinedClasses", runtimeResult.redefinedClasses());
+        result.addProperty("addedClasses", runtimeResult.addedClasses());
+        result.addProperty("invokedEntrypoints", runtimeResult.invokedEntrypoints().size());
         result.addProperty("appliedAt", Instant.now().toString());
         Files.writeString(
             results.resolve(control.testName() + ".jsonl"),
@@ -318,14 +358,16 @@ public final class AllcraftPatchClient {
     private static final class IncomingPatch {
         private final String testName;
         private final int step;
+        private final int totalSteps;
         private final String sha256;
         private final byte[][] chunks;
         private long totalBytes;
         private int receivedChunks;
 
-        private IncomingPatch(String testName, int step, int chunkCount, String sha256) {
+        private IncomingPatch(String testName, int step, int totalSteps, int chunkCount, String sha256) {
             this.testName = testName;
             this.step = step;
+            this.totalSteps = totalSteps;
             this.sha256 = sha256;
             this.chunks = new byte[chunkCount][];
         }
@@ -333,6 +375,7 @@ public final class AllcraftPatchClient {
         private void accept(AllcraftPayloads.PatchChunk payload) throws IOException {
             if (!this.testName.equals(payload.testName())
                 || this.step != payload.step()
+                || this.totalSteps != payload.totalSteps()
                 || !this.sha256.equals(payload.sha256())
                 || this.chunks.length != payload.chunkCount()) {
                 throw new IOException("Inconsistent patch chunk metadata");
