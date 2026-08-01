@@ -45,6 +45,7 @@ import net.minecraft.network.protocol.game.ClientboundCommandsPacket;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.commands.AdvancementCommands;
+import net.minecraft.server.commands.AllcraftCommand;
 import net.minecraft.server.commands.AttributeCommand;
 import net.minecraft.server.commands.BanIpCommands;
 import net.minecraft.server.commands.BanListCommands;
@@ -189,6 +190,7 @@ public class Commands {
 
    public Commands(final Commands.CommandSelection commandSelection, final CommandBuildContext context) {
       AdvancementCommands.register(this.dispatcher);
+      AllcraftCommand.register(this.dispatcher);
       AttributeCommand.register(this.dispatcher, context);
       ExecuteCommand.register(this.dispatcher, context);
       BossBarCommands.register(this.dispatcher, context);

@@ -4,7 +4,7 @@
 - [x] **2.** Get it running under our custom JVM / what is right for this: DCEVM—Dynamic Code Evolution VM, but you mentioned JetBrains JVM later?
 - [ ] **3.** Update our source directly so that:
   - [x] **3.1.** Every world in `saves/` gets a clone of the source in `saves/<world>/source` and a patch list in `saves/<world>/patches`.
-  - [ ] **3.2.** Server can stream patches down to users and synchronize to apply them on tick `<n>`.
+  - [x] **3.2.** Server can stream patches down to users and synchronize to apply them on tick `<n>`.
   - [ ] **3.3.** Server follows under the same architecture, so it applies its patches to the source in the save it is running on.
   - [ ] **3.4.** Patches to code, textures, sound, etc. (any part of the game) land seamlessly with no loading screens.
   - [ ] **3.5.** Modify source to unlock any frozen registries, remove `final` on changeable vars, and tear down restrictions.

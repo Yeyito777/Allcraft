@@ -7,6 +7,7 @@ import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.PacketType;
+import net.minecraft.network.protocol.common.custom.AllcraftPayloads;
 import net.minecraft.network.protocol.common.custom.BrandPayload;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.network.protocol.common.custom.DiscardedPayload;
@@ -18,7 +19,10 @@ public record ClientboundCustomPayloadPacket(CustomPacketPayload payload) implem
          id -> DiscardedPayload.codec(id, 1048576),
          Util.make(
             Lists.newArrayList(new CustomPacketPayload.TypeAndCodec[]{new CustomPacketPayload.TypeAndCodec<>(BrandPayload.TYPE, BrandPayload.STREAM_CODEC)}),
-            types -> {}
+            types -> {
+               types.add(new CustomPacketPayload.TypeAndCodec<>(AllcraftPayloads.PatchChunk.TYPE, AllcraftPayloads.PatchChunk.STREAM_CODEC));
+               types.add(new CustomPacketPayload.TypeAndCodec<>(AllcraftPayloads.PatchControl.TYPE, AllcraftPayloads.PatchControl.STREAM_CODEC));
+            }
          )
       )
       .map(ClientboundCustomPayloadPacket::new, ClientboundCustomPayloadPacket::payload);

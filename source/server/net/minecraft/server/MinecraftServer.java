@@ -49,6 +49,7 @@ import net.minecraft.ReportType;
 import net.minecraft.ReportedException;
 import net.minecraft.SharedConstants;
 import net.minecraft.SystemReport;
+import net.minecraft.allcraft.AllcraftPatchServer;
 import net.minecraft.allcraft.AllcraftWorldStorage;
 import net.minecraft.commands.CommandSource;
 import net.minecraft.commands.CommandSourceStack;
@@ -975,6 +976,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
       }
 
       this.tickCount++;
+      AllcraftPatchServer.tick(this);
       this.tickRateManager.tick();
       this.tickChildren(haveTime);
       if (nano - this.lastServerStatus >= STATUS_EXPIRE_TIME_NANOS) {

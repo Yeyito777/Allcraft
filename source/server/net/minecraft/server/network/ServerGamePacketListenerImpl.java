@@ -30,6 +30,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import net.minecraft.ChatFormatting;
 import net.minecraft.advancements.AdvancementHolder;
+import net.minecraft.allcraft.AllcraftPatchServer;
 import net.minecraft.advancements.triggers.CriteriaTriggers;
 import net.minecraft.commands.CommandSigningContext;
 import net.minecraft.commands.CommandSourceStack;
@@ -64,6 +65,7 @@ import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.PacketUtils;
 import net.minecraft.network.protocol.common.ServerboundClientInformationPacket;
 import net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket;
+import net.minecraft.network.protocol.common.custom.AllcraftPayloads;
 import net.minecraft.network.protocol.configuration.ConfigurationProtocols;
 import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
@@ -2189,6 +2191,10 @@ public class ServerGamePacketListenerImpl
 
    @Override
    public void handleCustomPayload(final ServerboundCustomPayloadPacket packet) {
+      PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+      if (packet.payload() instanceof AllcraftPayloads.PatchAck ack) {
+         AllcraftPatchServer.handleAck(this.server, this.player, ack);
+      }
    }
 
    @Override

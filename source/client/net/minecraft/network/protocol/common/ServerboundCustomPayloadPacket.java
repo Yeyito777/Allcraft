@@ -5,6 +5,7 @@ import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.PacketType;
+import net.minecraft.network.protocol.common.custom.AllcraftPayloads;
 import net.minecraft.network.protocol.common.custom.BrandPayload;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.network.protocol.common.custom.DiscardedPayload;
@@ -14,7 +15,9 @@ public record ServerboundCustomPayloadPacket(CustomPacketPayload payload) implem
     private static final int MAX_PAYLOAD_SIZE = 32767;
     public static final StreamCodec<FriendlyByteBuf, ServerboundCustomPayloadPacket> STREAM_CODEC = CustomPacketPayload.<FriendlyByteBuf>codec(
             id -> DiscardedPayload.codec(id, 32767),
-            Util.make(Lists.newArrayList(new CustomPacketPayload.TypeAndCodec<>(BrandPayload.TYPE, BrandPayload.STREAM_CODEC)), types -> {})
+            Util.make(Lists.newArrayList(new CustomPacketPayload.TypeAndCodec<>(BrandPayload.TYPE, BrandPayload.STREAM_CODEC)), types ->
+                types.add(new CustomPacketPayload.TypeAndCodec<>(AllcraftPayloads.PatchAck.TYPE, AllcraftPayloads.PatchAck.STREAM_CODEC))
+            )
         )
         .map(ServerboundCustomPayloadPacket::new, ServerboundCustomPayloadPacket::payload);
 

@@ -31,6 +31,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.ChatFormatting;
 import net.minecraft.advancements.AdvancementHolder;
+import net.minecraft.allcraft.AllcraftPatchClient;
 import net.minecraft.client.ClientClockManager;
 import net.minecraft.client.ClientRecipeBook;
 import net.minecraft.client.DebugQueryHandler;
@@ -101,6 +102,7 @@ import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.PacketUtils;
 import net.minecraft.network.protocol.common.ClientboundUpdateTagsPacket;
 import net.minecraft.network.protocol.common.ServerboundClientInformationPacket;
+import net.minecraft.network.protocol.common.custom.AllcraftPayloads;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.network.protocol.configuration.ConfigurationProtocols;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
@@ -2176,7 +2178,13 @@ public class ClientPacketListener extends ClientCommonPacketListenerImpl impleme
 
     @Override
     public void handleCustomPayload(CustomPacketPayload payload) {
-        this.handleUnknownCustomPayload(payload);
+        if (payload instanceof AllcraftPayloads.PatchChunk chunk) {
+            AllcraftPatchClient.handleChunk(this.minecraft, this, chunk);
+        } else if (payload instanceof AllcraftPayloads.PatchControl control) {
+            AllcraftPatchClient.handleControl(this.minecraft, this, control);
+        } else {
+            this.handleUnknownCustomPayload(payload);
+        }
     }
 
     private void handleUnknownCustomPayload(CustomPacketPayload payload) {
