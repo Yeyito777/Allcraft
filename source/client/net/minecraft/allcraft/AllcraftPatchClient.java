@@ -247,7 +247,12 @@ public final class AllcraftPatchClient {
         result.addProperty("artifact", artifact.getFileName().toString());
         result.addProperty("redefinedClasses", runtimeResult.redefinedClasses());
         result.addProperty("addedClasses", runtimeResult.addedClasses());
+        result.addProperty("unchangedClasses", runtimeResult.unchangedClasses());
         result.addProperty("invokedEntrypoints", runtimeResult.invokedEntrypoints().size());
+        result.addProperty("runtimeTotalMillis", runtimeResult.totalMillis());
+        result.addProperty("runtimeRedefineMillis", runtimeResult.redefineMillis());
+        result.addProperty("runtimeGcCollections", runtimeResult.gcCollections());
+        result.addProperty("runtimeGcMillis", runtimeResult.gcMillis());
         result.addProperty("appliedAt", Instant.now().toString());
         Files.writeString(
             results.resolve(control.testName() + ".jsonl"),

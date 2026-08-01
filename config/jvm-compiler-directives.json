@@ -1,0 +1,8 @@
+[
+  {
+    "match": "net.minecraft.world.entity.Entity::move",
+    "c2": {
+      "Exclude": true
+    }
+  }
+]

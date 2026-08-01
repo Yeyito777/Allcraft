@@ -20,9 +20,11 @@ The runtime tests each compile and activate one real source/bytecode patch:
 
 | Test | Checks | Manual verification |
 | --- | --- | --- |
-| `double-jump` | Redefines `LocalPlayer`, adds fields, and adds a helper class | Jump, release Space in midair, then press Space again |
+| `double-jump` | Redefines `LocalPlayer` and adds helper/state classes | Jump, release Space in midair, then press Space again |
 | `flying-boats` | Redefines client boat-control behavior | Ride a boat; hold Space to rise and Shift to descend |
 | `no-world-gen` | Redefines server chunk-generation classes | Travel into never-generated chunks; they should be empty |
 | `new-class` | Adds and invokes new client and server classes | No manual step; both entrypoints must run for `PASS` |
 
-The test prints `PASS` only after every connected client acknowledges every patch. Runtime tests compile from and update the active world's `source/` tree. Server results are written under the world's `patches/test-results/`; client results are written under `patches/<serverId>/<worldId>/test-results/`.
+Runtime compilation is queued in the background. Chat reports its duration and the client/server compiler-cache result. The test prints `PASS` only after every connected client acknowledges every patch.
+
+Runtime tests compile from and update the active world's `source/` tree. Server results are written under the world's `patches/test-results/`; client results are written under `patches/<serverId>/<worldId>/test-results/`. Result records include redefine, total runtime, and GC timing.

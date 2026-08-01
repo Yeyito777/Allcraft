@@ -37,6 +37,9 @@ exec "$java" \
     -Xmx4G \
     -javaagent:"$agent" \
     -XX:+AllowEnhancedClassRedefinition \
+    -XX:+OptimizeCodeFlush \
+    -XX:+UnlockDiagnosticVMOptions \
+    -XX:CompilerDirectivesFile="$repo_root/config/jvm-compiler-directives.json" \
     --sun-misc-unsafe-memory-access=allow \
     --enable-native-access=ALL-UNNAMED \
     -Djava.library.path="$build_dir/natives/java" \
@@ -45,6 +48,7 @@ exec "$java" \
     -Dio.netty.native.workdir="$build_dir/natives/netty" \
     -Dallcraft.sourceRoot="$repo_root/source" \
     -Dallcraft.gameDir="$game_dir" \
+    -Dallcraft.javac="$repo_root/jvm/linux-x64/bin/javac" \
     -Dallcraft.baseVersion=26.2-allcraft \
     -Dminecraft.launcher.brand=Allcraft \
     -Dminecraft.launcher.version=0.1 \

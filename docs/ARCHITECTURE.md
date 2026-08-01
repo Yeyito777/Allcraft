@@ -57,6 +57,7 @@ saves/<world>/
 ├── patches/
 │   ├── manifest.json        # serverId, worldId, base revision, current revision
 │   ├── source/              # ordered source diffs / commits
+│   ├── build-cache/         # content-addressed client/server compiler outputs
 │   └── artifacts/
 │       ├── client/          # compiled client deltas and cumulative overlays
 │       └── server/          # compiled server deltas and cumulative overlays
@@ -94,12 +95,17 @@ patches/
 - The bundled Allcraft Java agent exposes JVM `Instrumentation`.
 - Loaded classes are atomically redefined with JetBrains Runtime enhanced class redefinition.
 - New classes are appended to Minecraft's system classloader and loaded without restarting the game.
+- Byte-identical definitions are skipped instead of forcing another JVM-wide redefinition.
 - Optional static artifact entrypoints can initialize newly added code at activation.
-- Before a world revision is activated, the server compiles its authoritative world source into separate client and server JARs.
+- Before activation, a background coordinator compiles authoritative world source into separate client and server JARs.
+- `javac` runs in a constrained child JVM so compilation cannot block or pollute the game JVM's heap.
+- Compiler outputs are cached by source, classpath, compiler, and side; only changed inputs invalidate them.
 - At tick `N`, the server applies its server JAR and clients apply the corresponding client JAR.
 - Opening an evolved single-player world restores its ordered server and integrated-client artifacts automatically.
 
 Clients never run a Java build when joining or receiving an update.
+
+Actual class redefinition still requires a short JVM safepoint. JBR 25's DCEVM path also has a C2 bug around `Entity.move`; the launcher keeps C2 enabled globally but routes that one method through C1 and enables selective code flushing.
 
 ## Revision and cache strategy
 

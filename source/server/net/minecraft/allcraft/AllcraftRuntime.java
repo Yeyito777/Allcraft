@@ -13,12 +13,15 @@ import java.lang.instrument.Instrumentation;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.lang.management.GarbageCollectorMXBean;
+import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HexFormat;
@@ -34,12 +37,16 @@ import org.slf4j.Logger;
 public final class AllcraftRuntime {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Map<Class<?>, byte[]> BASE_DEFINITIONS = new IdentityHashMap<>();
+    private static final Map<Class<?>, byte[]> CURRENT_DEFINITIONS = new IdentityHashMap<>();
     private static final List<JarFile> APPENDED_ARTIFACTS = new ArrayList<>();
 
     private AllcraftRuntime() {
     }
 
     public static synchronized ApplyResult apply(Path artifact, String expectedSha256) throws Exception {
+        long startedAt = System.nanoTime();
+        long gcCountBefore = gcCount();
+        long gcMillisBefore = gcMillis();
         Path normalized = artifact.toAbsolutePath().normalize();
         if (!Files.isRegularFile(normalized)) {
             throw new IOException("Runtime artifact does not exist: " + normalized);
@@ -53,7 +60,7 @@ public final class AllcraftRuntime {
         Map<String, byte[]> classes = readClasses(normalized);
         List<String> entrypoints = readEntrypoints(normalized);
         if (classes.isEmpty() && entrypoints.isEmpty()) {
-            return new ApplyResult(0, 0, List.of());
+            return result(0, 0, 0, entrypoints, startedAt, 0L, gcCountBefore, gcMillisBefore);
         }
 
         Instrumentation instrumentation = AllcraftAgent.instrumentation();
@@ -64,7 +71,9 @@ public final class AllcraftRuntime {
         ClassLoader gameLoader = AllcraftRuntime.class.getClassLoader();
         Map<String, Class<?>> loaded = loadedClasses(instrumentation, gameLoader);
         List<ClassDefinition> redefinitions = new ArrayList<>();
+        Map<Class<?>, byte[]> changedDefinitions = new IdentityHashMap<>();
         List<String> added = new ArrayList<>();
+        List<String> skipped = new ArrayList<>();
 
         for (Map.Entry<String, byte[]> entry : classes.entrySet()) {
             Class<?> current = loaded.get(entry.getKey());
@@ -78,38 +87,60 @@ public final class AllcraftRuntime {
             }
 
             rememberBaseDefinition(current);
+            if (Arrays.equals(CURRENT_DEFINITIONS.get(current), entry.getValue())) {
+                skipped.add(current.getName());
+                continue;
+            }
+
             redefinitions.add(new ClassDefinition(current, entry.getValue()));
+            changedDefinitions.put(current, entry.getValue());
         }
 
-        JarFile appended = new JarFile(normalized.toFile(), false);
-        boolean retained = false;
+        JarFile appended = null;
+        long redefineMillis = 0L;
         try {
-            instrumentation.appendToSystemClassLoaderSearch(appended);
-            APPENDED_ARTIFACTS.add(appended);
-            retained = true;
+            if (!added.isEmpty()) {
+                appended = new JarFile(normalized.toFile(), false);
+                instrumentation.appendToSystemClassLoaderSearch(appended);
+                APPENDED_ARTIFACTS.add(appended);
+            }
             for (String className : added) {
-                Class.forName(className, false, gameLoader);
+                Class<?> addedClass = Class.forName(className, false, gameLoader);
+                CURRENT_DEFINITIONS.put(addedClass, classes.get(className));
             }
             if (!redefinitions.isEmpty()) {
+                long redefineStartedAt = System.nanoTime();
                 instrumentation.redefineClasses(redefinitions.toArray(ClassDefinition[]::new));
+                redefineMillis = elapsedMillis(redefineStartedAt);
+                CURRENT_DEFINITIONS.putAll(changedDefinitions);
             }
 
             invokeEntrypoints(entrypoints, gameLoader);
-        } finally {
-            if (!retained) {
+        } catch (Exception | Error e) {
+            if (appended != null && !APPENDED_ARTIFACTS.contains(appended)) {
                 appended.close();
             }
+            throw e;
         }
 
         List<String> redefinedNames = redefinitions.stream().map(definition -> definition.getDefinitionClass().getName()).sorted().toList();
         added.sort(Comparator.naturalOrder());
+        skipped.sort(Comparator.naturalOrder());
+        ApplyResult result = result(
+            redefinedNames.size(), added.size(), skipped.size(), entrypoints, startedAt, redefineMillis, gcCountBefore, gcMillisBefore
+        );
         LOGGER.info(
-            "Applied Allcraft artifact {}: {} redefined class(es), {} added class(es)",
+            "Applied Allcraft artifact {}: {} redefined, {} added, {} unchanged; {} ms total, {} ms redefine, GC delta {}/{} ms",
             normalized.getFileName(),
             redefinedNames.size(),
-            added.size()
+            added.size(),
+            skipped.size(),
+            result.totalMillis(),
+            result.redefineMillis(),
+            result.gcCollections(),
+            result.gcMillis()
         );
-        return new ApplyResult(redefinedNames.size(), added.size(), entrypoints);
+        return result;
     }
 
     public static synchronized void resetToBase() throws Exception {
@@ -118,16 +149,24 @@ public final class AllcraftRuntime {
         }
 
         Instrumentation instrumentation = AllcraftAgent.instrumentation();
-        List<ClassDefinition> definitions = new ArrayList<>(BASE_DEFINITIONS.size());
-        for (Map.Entry<Class<?>, byte[]> entry : BASE_DEFINITIONS.entrySet()) {
-            if (instrumentation.isModifiableClass(entry.getKey())) {
-                definitions.add(new ClassDefinition(entry.getKey(), entry.getValue()));
+        List<Map.Entry<Class<?>, byte[]>> definitions = BASE_DEFINITIONS.entrySet()
+            .stream()
+            .filter(entry -> instrumentation.isModifiableClass(entry.getKey()))
+            .filter(entry -> !Arrays.equals(entry.getValue(), CURRENT_DEFINITIONS.get(entry.getKey())))
+            .sorted(Comparator.comparing(entry -> entry.getKey().getName()))
+            .toList();
+        long startedAt = System.nanoTime();
+        for (Map.Entry<Class<?>, byte[]> entry : definitions) {
+            try {
+                instrumentation.redefineClasses(new ClassDefinition(entry.getKey(), entry.getValue()));
+                CURRENT_DEFINITIONS.put(entry.getKey(), entry.getValue());
+            } catch (Exception e) {
+                throw new IllegalStateException("Failed to reset runtime class " + entry.getKey().getName(), e);
             }
         }
 
         if (!definitions.isEmpty()) {
-            instrumentation.redefineClasses(definitions.toArray(ClassDefinition[]::new));
-            LOGGER.info("Reset {} Allcraft-modified class(es) to the installed base", definitions.size());
+            LOGGER.info("Reset {} Allcraft-modified class(es) to the installed base in {} ms", definitions.size(), elapsedMillis(startedAt));
         }
     }
 
@@ -201,7 +240,9 @@ public final class AllcraftRuntime {
                 throw new IOException("Cannot capture installed definition for " + type.getName());
             }
 
-            BASE_DEFINITIONS.put(type, input.readAllBytes());
+            byte[] baseDefinition = input.readAllBytes();
+            BASE_DEFINITIONS.put(type, baseDefinition);
+            CURRENT_DEFINITIONS.putIfAbsent(type, baseDefinition);
         }
     }
 
@@ -248,9 +289,69 @@ public final class AllcraftRuntime {
         }
     }
 
-    public record ApplyResult(int redefinedClasses, int addedClasses, List<String> invokedEntrypoints) {
+    private static ApplyResult result(
+        int redefinedClasses,
+        int addedClasses,
+        int unchangedClasses,
+        List<String> entrypoints,
+        long startedAt,
+        long redefineMillis,
+        long gcCountBefore,
+        long gcMillisBefore
+    ) {
+        return new ApplyResult(
+            redefinedClasses,
+            addedClasses,
+            unchangedClasses,
+            List.copyOf(entrypoints),
+            elapsedMillis(startedAt),
+            redefineMillis,
+            Math.max(0L, gcCount() - gcCountBefore),
+            Math.max(0L, gcMillis() - gcMillisBefore)
+        );
+    }
+
+    private static long elapsedMillis(long startedAt) {
+        return (System.nanoTime() - startedAt) / 1_000_000L;
+    }
+
+    private static long gcCount() {
+        long total = 0L;
+        for (GarbageCollectorMXBean collector : ManagementFactory.getGarbageCollectorMXBeans()) {
+            total += Math.max(0L, collector.getCollectionCount());
+        }
+        return total;
+    }
+
+    private static long gcMillis() {
+        long total = 0L;
+        for (GarbageCollectorMXBean collector : ManagementFactory.getGarbageCollectorMXBeans()) {
+            total += Math.max(0L, collector.getCollectionTime());
+        }
+        return total;
+    }
+
+    public record ApplyResult(
+        int redefinedClasses,
+        int addedClasses,
+        int unchangedClasses,
+        List<String> invokedEntrypoints,
+        long totalMillis,
+        long redefineMillis,
+        long gcCollections,
+        long gcMillis
+    ) {
         public String summary() {
-            return this.redefinedClasses + " redefined, " + this.addedClasses + " added, " + this.invokedEntrypoints.size() + " activated";
+            return this.redefinedClasses
+                + " redefined, "
+                + this.addedClasses
+                + " added, "
+                + this.unchangedClasses
+                + " unchanged, "
+                + this.invokedEntrypoints.size()
+                + " activated in "
+                + this.totalMillis
+                + " ms";
         }
     }
 

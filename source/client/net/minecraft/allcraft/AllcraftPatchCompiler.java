@@ -1,6 +1,7 @@
 package net.minecraft.allcraft;
 
 import com.mojang.logging.LogUtils;
+import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -11,25 +12,23 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
-import javax.tools.Diagnostic;
-import javax.tools.DiagnosticCollector;
-import javax.tools.JavaCompiler;
-import javax.tools.JavaFileObject;
-import javax.tools.StandardJavaFileManager;
-import javax.tools.StandardLocation;
-import javax.tools.ToolProvider;
 import org.slf4j.Logger;
 
 /** Server-side compiler for real source-changing Allcraft test patches. */
 public final class AllcraftPatchCompiler {
     public static final List<String> RUNTIME_TEST_NAMES = List.of("double-jump", "no-world-gen", "flying-boats", "new-class");
+    private static final String CACHE_FORMAT = "allcraft-javac-cache-v2";
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final String LOCAL_PLAYER = "client/net/minecraft/client/player/LocalPlayer.java";
     private static final String DOUBLE_JUMP_HELPER = "client/net/minecraft/client/player/AllcraftDoubleJump.java";
@@ -60,23 +59,25 @@ public final class AllcraftPatchCompiler {
 
         applyEdits(edits);
         try {
-            Path clientOutput = workRoot.resolve("classes/client");
-            Path serverOutput = workRoot.resolve("classes/server");
-            deleteTree(clientOutput);
-            deleteTree(serverOutput);
-
             List<Path> clientSources = clientSources(worldSource, testName);
             List<Path> serverSources = serverSources(worldSource, testName);
-            Map<String, byte[]> clientClasses = clientSources.isEmpty() ? Map.of() : compileJava(clientSources, clientOutput);
-            Map<String, byte[]> serverClasses = serverSources.isEmpty() ? Map.of() : compileJava(serverSources, serverOutput);
+            Compilation clientCompilation = clientSources.isEmpty()
+                ? Compilation.empty()
+                : compileJava(clientSources, workRoot.resolve("client"));
+            Compilation serverCompilation = serverSources.isEmpty()
+                ? Compilation.empty()
+                : compileJava(serverSources, workRoot.resolve("server"));
             List<String> changedFiles = edits.stream().map(edit -> worldSource.relativize(edit.path()).toString()).sorted().toList();
             return new Build(
-                clientClasses,
-                serverClasses,
+                clientCompilation.classes(),
+                serverCompilation.classes(),
                 changedFiles,
                 clientEntrypoints(testName),
                 serverEntrypoints(testName),
-                instructions(testName)
+                instructions(testName),
+                clientCompilation.cacheHit(),
+                serverCompilation.cacheHit(),
+                clientCompilation.elapsedMillis() + serverCompilation.elapsedMillis()
             );
         } catch (Exception e) {
             restoreEdits(edits);
@@ -92,36 +93,11 @@ public final class AllcraftPatchCompiler {
         List<SourceEdit> edits = new ArrayList<>();
         edits.add(
             editExisting(sourceRoot, LOCAL_PLAYER, source -> {
-                String updated = insertBeforeOnce(
-                    source,
-                    "ALLCRAFT PATCH: double-jump fields",
-                    "    private boolean doLimitedCrafting = false;",
-                    "    // ALLCRAFT PATCH: double-jump fields\n"
-                        + "    private boolean allcraftDoubleJumpReady;\n"
-                        + "    private boolean allcraftDoubleJumpWasPressed;\n\n"
-                );
-                return insertBeforeOnce(
-                    updated,
-                    "ALLCRAFT PATCH: double-jump behavior",
-                    "        super.aiStep();",
-                    "        // ALLCRAFT PATCH: double-jump behavior\n"
-                        + "        boolean allcraftDoubleJumpPressed = this.input.keyPresses.jump();\n"
-                        + "        if (this.onGround()) {\n"
-                        + "            this.allcraftDoubleJumpReady = true;\n"
-                        + "        } else if (allcraftDoubleJumpPressed\n"
-                        + "            && !this.allcraftDoubleJumpWasPressed\n"
-                        + "            && this.allcraftDoubleJumpReady\n"
-                        + "            && !this.isPassenger()\n"
-                        + "            && !abilities.flying) {\n"
-                        + "            this.setDeltaMovement(\n"
-                        + "                this.getDeltaMovement().x,\n"
-                        + "                AllcraftDoubleJump.verticalVelocity(this.getDeltaMovement().y),\n"
-                        + "                this.getDeltaMovement().z\n"
-                        + "            );\n"
-                        + "            this.allcraftDoubleJumpReady = false;\n"
-                        + "        }\n"
-                        + "        this.allcraftDoubleJumpWasPressed = allcraftDoubleJumpPressed;\n\n"
-                );
+                String behavior = "        // ALLCRAFT PATCH: double-jump behavior\n"
+                    + "        AllcraftDoubleJump.tick(\n"
+                    + "            this, this.input.keyPresses.jump(), this.onGround(), this.isPassenger(), abilities.flying\n"
+                    + "        );\n\n";
+                return replaceOrInsertMarkedBlock(source, "ALLCRAFT PATCH: double-jump behavior", "        super.aiStep();", behavior);
             })
         );
         edits.add(
@@ -129,15 +105,33 @@ public final class AllcraftPatchCompiler {
                 sourceRoot,
                 DOUBLE_JUMP_HELPER,
                 "package net.minecraft.client.player;\n\n"
+                    + "import java.util.Collections;\n"
+                    + "import java.util.Map;\n"
+                    + "import java.util.WeakHashMap;\n\n"
                     + "/** Added to the running game by the Allcraft double-jump patch. */\n"
                     + "public final class AllcraftDoubleJump {\n"
+                    + "    private static final Map<LocalPlayer, State> STATES = Collections.synchronizedMap(new WeakHashMap<>());\n\n"
                     + "    private AllcraftDoubleJump() {\n"
                     + "    }\n\n"
-                    + "    public static double verticalVelocity(double currentVelocity) {\n"
-                    + "        return Math.max(currentVelocity, 0.62D);\n"
+                    + "    public static void tick(LocalPlayer player, boolean pressed, boolean onGround, boolean passenger, boolean flying) {\n"
+                    + "        State state = STATES.computeIfAbsent(player, ignored -> new State());\n"
+                    + "        if (onGround) {\n"
+                    + "            state.ready = true;\n"
+                    + "        } else if (pressed && !state.wasPressed && state.ready && !passenger && !flying) {\n"
+                    + "            player.setDeltaMovement(\n"
+                    + "                player.getDeltaMovement().x, Math.max(player.getDeltaMovement().y, 0.62D), player.getDeltaMovement().z\n"
+                    + "            );\n"
+                    + "            state.ready = false;\n"
+                    + "        }\n"
+                    + "        state.wasPressed = pressed;\n"
                     + "    }\n\n"
                     + "    public static void allcraftActivate() {\n"
                     + "        System.setProperty(\"allcraft.runtime.double-jump\", \"activated\");\n"
+                    + "    }\n"
+                    + "\n"
+                    + "    private static final class State {\n"
+                    + "        private boolean ready;\n"
+                    + "        private boolean wasPressed;\n"
                     + "    }\n"
                     + "}\n"
             )
@@ -386,6 +380,21 @@ public final class AllcraftPatchCompiler {
         return source.substring(0, end) + insertion + source.substring(end);
     }
 
+    private static String replaceOrInsertMarkedBlock(String source, String marker, String anchor, String replacement) {
+        int markerIndex = source.indexOf(marker);
+        if (markerIndex < 0) {
+            return insertBeforeOnce(source, marker, anchor, replacement);
+        }
+
+        int blockStart = source.lastIndexOf('\n', markerIndex);
+        blockStart = blockStart < 0 ? 0 : blockStart + 1;
+        int anchorIndex = source.indexOf(anchor, markerIndex);
+        if (anchorIndex < 0) {
+            throw new IllegalArgumentException("missing anchor after marker: " + anchor);
+        }
+        return source.substring(0, blockStart) + replacement + source.substring(anchorIndex);
+    }
+
     private static String replaceMethodBodyOnce(String source, String marker, String signature, String body) {
         if (source.contains(marker)) {
             return source;
@@ -443,56 +452,147 @@ public final class AllcraftPatchCompiler {
         return indent + value.replace("\n", "\n" + indent);
     }
 
-    private static Map<String, byte[]> compileJava(List<Path> sourceFiles, Path output) throws IOException {
-        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
-        if (compiler == null) {
-            throw new IOException("The bundled Allcraft SDK does not provide the Java compiler");
-        }
-
-        Files.createDirectories(output);
-        DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
-        try (StandardJavaFileManager files = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8)) {
-            files.setLocationFromPaths(StandardLocation.CLASS_OUTPUT, List.of(output));
-            Iterable<? extends JavaFileObject> units = files.getJavaFileObjectsFromPaths(sourceFiles);
-            List<String> options = List.of(
-                "-classpath",
-                System.getProperty("java.class.path"),
-                "-encoding",
-                "UTF-8",
-                "-g",
-                "-parameters",
-                "-proc:none",
-                "-implicit:none"
-            );
-            boolean success = Boolean.TRUE.equals(compiler.getTask(null, files, diagnostics, options, null, units).call());
-            if (!success) {
-                StringBuilder message = new StringBuilder("Runtime patch compilation failed");
-                for (Diagnostic<? extends JavaFileObject> diagnostic : diagnostics.getDiagnostics()) {
-                    message.append(System.lineSeparator())
-                        .append(diagnostic.getKind())
-                        .append(" ")
-                        .append(diagnostic.getSource() == null ? "" : diagnostic.getSource().getName())
-                        .append(":")
-                        .append(diagnostic.getLineNumber())
-                        .append(" ")
-                        .append(diagnostic.getMessage(Locale.ROOT));
-                }
-                throw new IOException(message.toString());
+    private static Compilation compileJava(List<Path> sourceFiles, Path cacheRoot) throws IOException {
+        long startedAt = System.nanoTime();
+        String key = cacheKey(sourceFiles);
+        Path entry = cacheRoot.resolve(key);
+        Path output = entry.resolve("classes");
+        Path complete = entry.resolve("complete");
+        if (Files.isRegularFile(complete)) {
+            Map<String, byte[]> cached = readClasses(output);
+            if (!cached.isEmpty()) {
+                LOGGER.info("Allcraft compiler cache hit {} for {} source file(s)", key.substring(0, 12), sourceFiles.size());
+                return new Compilation(cached, true, elapsedMillis(startedAt));
             }
         }
 
+        Files.createDirectories(cacheRoot);
+        Path temporary = cacheRoot.resolve("." + key + "." + UUID.randomUUID() + ".tmp");
+        Path temporaryOutput = temporary.resolve("classes");
+        Path compilerLog = temporary.resolve("javac.log");
+        Files.createDirectories(temporaryOutput);
+        List<String> command = new ArrayList<>();
+        command.add(configuredJavac().toString());
+        command.add("-J-Xms32m");
+        command.add("-J-Xmx768m");
+        command.add("-J-XX:ActiveProcessorCount=2");
+        command.add("-J-XX:+UseSerialGC");
+        command.add("-classpath");
+        command.add(System.getProperty("java.class.path"));
+        command.add("-d");
+        command.add(temporaryOutput.toString());
+        command.add("-encoding");
+        command.add("UTF-8");
+        command.add("-g");
+        command.add("-parameters");
+        command.add("-proc:none");
+        command.add("-implicit:none");
+        sourceFiles.stream().map(path -> path.toAbsolutePath().normalize().toString()).forEach(command::add);
+
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(compilerLog.toFile()).start();
+        boolean finished;
+        try {
+            finished = process.waitFor(5L, TimeUnit.MINUTES);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            process.destroyForcibly();
+            deleteTree(temporary);
+            throw new IOException("Interrupted while compiling runtime patch", e);
+        }
+        if (!finished) {
+            process.destroyForcibly();
+            deleteTree(temporary);
+            throw new IOException("Runtime patch compilation timed out after five minutes");
+        }
+        if (process.exitValue() != 0) {
+            String outputText = Files.isRegularFile(compilerLog) ? Files.readString(compilerLog, StandardCharsets.UTF_8) : "";
+            deleteTree(temporary);
+            throw new IOException("Runtime patch compilation failed:\n" + outputText.substring(0, Math.min(outputText.length(), 12000)));
+        }
+
+        Map<String, byte[]> classes = readClasses(temporaryOutput);
+        if (classes.isEmpty()) {
+            deleteTree(temporary);
+            throw new IOException("Runtime patch compiler produced no class files for " + sourceFiles);
+        }
+        Files.writeString(temporary.resolve("complete"), key + System.lineSeparator(), StandardCharsets.UTF_8);
+        deleteTree(entry);
+        try {
+            Files.move(temporary, entry, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(temporary, entry);
+        }
+        LOGGER.info(
+            "Allcraft external compiler built {} class(es) from {} source file(s) in {} ms",
+            classes.size(),
+            sourceFiles.size(),
+            elapsedMillis(startedAt)
+        );
+        return new Compilation(classes, false, elapsedMillis(startedAt));
+    }
+
+    private static Map<String, byte[]> readClasses(Path output) throws IOException {
         Map<String, byte[]> classes = new LinkedHashMap<>();
+        if (!Files.isDirectory(output)) {
+            return classes;
+        }
         try (Stream<Path> paths = Files.walk(output)) {
             for (Path classFile : paths.filter(Files::isRegularFile).filter(path -> path.toString().endsWith(".class")).sorted().toList()) {
                 String entry = output.relativize(classFile).toString().replace(classFile.getFileSystem().getSeparator(), "/");
                 classes.put(entry, Files.readAllBytes(classFile));
             }
         }
-        if (classes.isEmpty()) {
-            throw new IOException("Runtime patch compiler produced no class files for " + sourceFiles);
-        }
-
         return classes;
+    }
+
+    private static Path configuredJavac() throws IOException {
+        String configured = System.getProperty("allcraft.javac");
+        Path javac = configured == null || configured.isBlank()
+            ? Path.of(System.getProperty("java.home"), "bin", isWindows() ? "javac.exe" : "javac")
+            : Path.of(configured);
+        javac = javac.toAbsolutePath().normalize();
+        if (!Files.isExecutable(javac)) {
+            throw new IOException("Allcraft javac is missing or not executable: " + javac);
+        }
+        return javac;
+    }
+
+    private static String cacheKey(List<Path> sourceFiles) throws IOException {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            updateDigest(digest, CACHE_FORMAT);
+            updateDigest(digest, configuredJavac().toString());
+            for (Path source : sourceFiles.stream().map(path -> path.toAbsolutePath().normalize()).sorted().toList()) {
+                updateDigest(digest, source.toString());
+                digest.update(Files.readAllBytes(source));
+            }
+            String classPath = System.getProperty("java.class.path");
+            updateDigest(digest, classPath);
+            for (String value : classPath.split(java.util.regex.Pattern.quote(File.pathSeparator))) {
+                Path entry = Path.of(value);
+                if (Files.exists(entry)) {
+                    updateDigest(digest, entry.toAbsolutePath().normalize().toString());
+                    updateDigest(digest, Long.toString(Files.size(entry)));
+                    updateDigest(digest, Long.toString(Files.getLastModifiedTime(entry).toMillis()));
+                }
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static void updateDigest(MessageDigest digest, String value) {
+        digest.update(value.getBytes(StandardCharsets.UTF_8));
+        digest.update((byte)0);
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
+    }
+
+    private static long elapsedMillis(long startedAt) {
+        return (System.nanoTime() - startedAt) / 1_000_000L;
     }
 
     private static void writeAtomically(Path path, String content) throws IOException {
@@ -542,8 +642,17 @@ public final class AllcraftPatchCompiler {
         List<String> changedFiles,
         List<String> clientEntrypoints,
         List<String> serverEntrypoints,
-        String instructions
+        String instructions,
+        boolean clientCacheHit,
+        boolean serverCacheHit,
+        long compilationMillis
     ) {
+    }
+
+    private record Compilation(Map<String, byte[]> classes, boolean cacheHit, long elapsedMillis) {
+        private static Compilation empty() {
+            return new Compilation(Map.of(), true, 0L);
+        }
     }
 
     private record SourceEdit(Path path, String original, String updated, boolean existed) {

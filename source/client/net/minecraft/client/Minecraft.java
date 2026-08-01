@@ -73,6 +73,7 @@ import net.minecraft.ReportType;
 import net.minecraft.ReportedException;
 import net.minecraft.SharedConstants;
 import net.minecraft.SystemReport;
+import net.minecraft.allcraft.AllcraftIpcServer;
 import net.minecraft.client.color.block.BlockColors;
 import net.minecraft.client.entity.ClientMannequin;
 import net.minecraft.client.gui.ComponentPath;
@@ -747,6 +748,7 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
                     }
                 }
             );
+        AllcraftIpcServer.start(this);
     }
 
     public boolean hasShiftDown() {

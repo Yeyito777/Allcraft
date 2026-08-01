@@ -28,6 +28,10 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 import java.util.zip.CRC32;
@@ -50,7 +54,13 @@ public final class AllcraftPatchServer {
     private static final Gson COMPACT_GSON = new Gson();
     private static final int NETWORK_PATCH_COUNT = 5;
     private static final int ACK_TIMEOUT_TICKS = 600;
+    private static final ExecutorService COMPILER_EXECUTOR = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "Allcraft Compiler Coordinator");
+        thread.setDaemon(true);
+        return thread;
+    });
     private static final Map<MinecraftServer, TestRun> ACTIVE_TESTS = new IdentityHashMap<>();
+    private static final Map<MinecraftServer, CompilationJob> COMPILING_TESTS = new IdentityHashMap<>();
 
     private AllcraftPatchServer() {
     }
@@ -62,7 +72,7 @@ public final class AllcraftPatchServer {
             return 0;
         }
 
-        if (ACTIVE_TESTS.containsKey(server)) {
+        if (ACTIVE_TESTS.containsKey(server) || COMPILING_TESTS.containsKey(server)) {
             source.sendFailure(Component.literal("An Allcraft patch test is already running"));
             return 0;
         }
@@ -72,26 +82,26 @@ public final class AllcraftPatchServer {
             return 0;
         }
 
-        try {
-            boolean runtimeTest = AllcraftPatchCompiler.RUNTIME_TEST_NAMES.contains(testName);
-            source.sendSuccess(
-                () -> Component.literal(
-                        runtimeTest
-                            ? "Compiling real client/server bytecode for Allcraft test '" + testName + "'"
-                            : "Starting Allcraft test '" + testName + "': five compiled network patches will be staged and activated"
-                    )
-                    .withStyle(ChatFormatting.AQUA),
-                false
-            );
-            TestRun run = prepareTest(server, testName);
-            ACTIVE_TESTS.put(server, run);
-            stageCurrentPatch(server, run);
-            return 1;
-        } catch (Exception e) {
-            LOGGER.error("Failed to start Allcraft test {}", testName, e);
-            source.sendFailure(Component.literal("Failed to start Allcraft test: " + conciseMessage(e)));
-            return 0;
-        }
+        boolean runtimeTest = AllcraftPatchCompiler.RUNTIME_TEST_NAMES.contains(testName);
+        Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
+        CompletableFuture<TestRun> future = CompletableFuture.supplyAsync(() -> {
+            try {
+                return prepareTest(worldRoot, testName);
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        }, COMPILER_EXECUTOR);
+        COMPILING_TESTS.put(server, new CompilationJob(testName, future));
+        source.sendSuccess(
+            () -> Component.literal(
+                    runtimeTest
+                        ? "Queued background client/server compilation for Allcraft test '" + testName + "'"
+                        : "Preparing Allcraft test '" + testName + "' in the background"
+                )
+                .withStyle(ChatFormatting.AQUA),
+            false
+        );
+        return 1;
     }
 
     public static void restoreWorldArtifacts(Path worldRoot) {
@@ -142,6 +152,39 @@ public final class AllcraftPatchServer {
     }
 
     public static void tick(MinecraftServer server) {
+        CompilationJob compilation = COMPILING_TESTS.get(server);
+        if (compilation != null) {
+            if (!compilation.future().isDone()) {
+                return;
+            }
+
+            COMPILING_TESTS.remove(server);
+            try {
+                TestRun compiledRun = compilation.future().join();
+                ACTIVE_TESTS.put(server, compiledRun);
+                announce(
+                    server,
+                    "[Allcraft] Prepared "
+                        + compiledRun.testName
+                        + " in "
+                        + compiledRun.compilationMillis
+                        + " ms (client cache "
+                        + (compiledRun.clientCacheHit ? "hit" : "miss")
+                        + ", server cache "
+                        + (compiledRun.serverCacheHit ? "hit" : "miss")
+                        + ")",
+                    ChatFormatting.AQUA
+                );
+                stageCurrentPatch(server, compiledRun);
+            } catch (CompletionException e) {
+                Throwable cause = e.getCause() == null ? e : e.getCause();
+                String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+                announce(server, "[Allcraft] FAIL " + compilation.testName() + ": " + message, ChatFormatting.RED);
+                LOGGER.error("Failed to prepare Allcraft test {}", compilation.testName(), cause);
+            }
+            return;
+        }
+
         TestRun run = ACTIVE_TESTS.get(server);
         if (run == null) {
             return;
@@ -234,8 +277,7 @@ public final class AllcraftPatchServer {
         }
     }
 
-    private static TestRun prepareTest(MinecraftServer server, String testName) throws IOException {
-        Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
+    private static TestRun prepareTest(Path worldRoot, String testName) throws IOException {
         Path patchesRoot = worldRoot.resolve("patches");
         Path manifestPath = patchesRoot.resolve("manifest.json");
         JsonObject manifest = readJson(manifestPath);
@@ -246,6 +288,9 @@ public final class AllcraftPatchServer {
         int patchCount = NETWORK_TEST_NAMES.contains(testName) ? NETWORK_PATCH_COUNT : 1;
         List<StepSpec> specs = specs(testName, patchCount);
         List<Patch> patches = new ArrayList<>(patchCount);
+        boolean clientCacheHit = true;
+        boolean serverCacheHit = true;
+        long compilationMillis = 0L;
 
         for (int index = 0; index < patchCount; index++) {
             int step = index + 1;
@@ -259,7 +304,7 @@ public final class AllcraftPatchServer {
             List<String> serverEntrypoints = List.of();
             if (AllcraftPatchCompiler.RUNTIME_TEST_NAMES.contains(testName)) {
                 AllcraftPatchCompiler.Build build = AllcraftPatchCompiler.compile(
-                    worldRoot.resolve("source"), patchesRoot.resolve("build").resolve(runId), testName
+                    worldRoot.resolve("source"), patchesRoot.resolve("build-cache"), testName
                 );
                 clientClasses = build.clientClasses();
                 serverClasses = build.serverClasses();
@@ -267,6 +312,9 @@ public final class AllcraftPatchServer {
                 clientEntrypoints = build.clientEntrypoints();
                 serverEntrypoints = build.serverEntrypoints();
                 spec = new StepSpec("title", build.instructions(), 0, 20);
+                clientCacheHit &= build.clientCacheHit();
+                serverCacheHit &= build.serverCacheHit();
+                compilationMillis += build.compilationMillis();
             }
 
             byte[] clientArtifact = createArtifact(
@@ -292,7 +340,9 @@ public final class AllcraftPatchServer {
             persistPreparedPatch(patchesRoot, serverId, worldId, testName, runId, patch);
         }
 
-        return new TestRun(testName, runId, serverId, worldId, patches, patchesRoot);
+        return new TestRun(
+            testName, runId, serverId, worldId, patches, patchesRoot, clientCacheHit, serverCacheHit, compilationMillis
+        );
     }
 
     private static List<StepSpec> specs(String testName, int patchCount) {
@@ -543,6 +593,9 @@ public final class AllcraftPatchServer {
         result.addProperty("serverSha256", patch.serverSha256);
         result.addProperty("activationTick", patch.activationTick);
         result.addProperty("serverRuntime", patch.serverApplyResult == null ? "not applied" : patch.serverApplyResult.summary());
+        result.addProperty("compilationMillis", run.compilationMillis);
+        result.addProperty("clientCompilerCacheHit", run.clientCacheHit);
+        result.addProperty("serverCompilerCacheHit", run.serverCacheHit);
         result.addProperty("serverAppliedAt", Instant.now().toString());
         Path results = run.patchesRoot.resolve("test-results");
         Files.createDirectories(results);
@@ -682,6 +735,9 @@ public final class AllcraftPatchServer {
     private record StepSpec(String display, String message, int fillerBytes, int activationDelayTicks) {
     }
 
+    private record CompilationJob(String testName, CompletableFuture<TestRun> future) {
+    }
+
     private static final class Patch {
         private final String patchId;
         private final long revision;
@@ -732,6 +788,9 @@ public final class AllcraftPatchServer {
         private final String worldId;
         private final List<Patch> patches;
         private final Path patchesRoot;
+        private final boolean clientCacheHit;
+        private final boolean serverCacheHit;
+        private final long compilationMillis;
         private final Set<UUID> expectedPlayers = new HashSet<>();
         private final Set<UUID> readyPlayers = new HashSet<>();
         private final Set<UUID> appliedPlayers = new HashSet<>();
@@ -740,13 +799,26 @@ public final class AllcraftPatchServer {
         private long phaseStartedAt;
         private long nextStageTick;
 
-        private TestRun(String testName, String runId, String serverId, String worldId, List<Patch> patches, Path patchesRoot) {
+        private TestRun(
+            String testName,
+            String runId,
+            String serverId,
+            String worldId,
+            List<Patch> patches,
+            Path patchesRoot,
+            boolean clientCacheHit,
+            boolean serverCacheHit,
+            long compilationMillis
+        ) {
             this.testName = testName;
             this.runId = runId;
             this.serverId = serverId;
             this.worldId = worldId;
             this.patches = patches;
             this.patchesRoot = patchesRoot;
+            this.clientCacheHit = clientCacheHit;
+            this.serverCacheHit = serverCacheHit;
+            this.compilationMillis = compilationMillis;
         }
 
         private Patch current() {
