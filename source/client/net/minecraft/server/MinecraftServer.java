@@ -49,6 +49,7 @@ import net.minecraft.ReportType;
 import net.minecraft.ReportedException;
 import net.minecraft.SharedConstants;
 import net.minecraft.SystemReport;
+import net.minecraft.allcraft.AllcraftWorldStorage;
 import net.minecraft.commands.CommandSource;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -322,6 +323,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
         NotificationManager notificationManager
     ) {
         super("Server", propagatesCrashes);
+        AllcraftWorldStorage.initialize(storageSource);
         this.registries = worldStem.registries();
         if (!this.registries.compositeAccess().lookupOrThrow(Registries.LEVEL_STEM).containsKey(LevelStem.OVERWORLD)) {
             throw new IllegalStateException("Missing Overworld dimension data");

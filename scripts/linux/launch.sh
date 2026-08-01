@@ -37,6 +37,9 @@ exec "$java" \
     -Djna.tmpdir="$build_dir/natives/jna" \
     -Dorg.lwjgl.system.SharedLibraryExtractPath="$build_dir/natives/lwjgl" \
     -Dio.netty.native.workdir="$build_dir/natives/netty" \
+    -Dallcraft.sourceRoot="$repo_root/source" \
+    -Dallcraft.gameDir="$game_dir" \
+    -Dallcraft.baseVersion=26.2-allcraft \
     -Dminecraft.launcher.brand=Allcraft \
     -Dminecraft.launcher.version=0.1 \
     -Dlog4j.configurationFile="$build_dir/logging/client-1.21.2.xml" \
