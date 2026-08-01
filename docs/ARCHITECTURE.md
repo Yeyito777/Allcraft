@@ -1,10 +1,10 @@
-# Sourcecraft Architecture
+# Allcraft Architecture
 
 ## Core model
 
-Sourcecraft works like a Roblox-style engine and place:
+Allcraft works like a Roblox-style engine and place:
 
-- Sourcecraft is the installed base engine.
+- Allcraft is the installed base engine.
 - A server owns the authoritative source and revision of its world.
 - Exocortex modifies and compiles that source on the server.
 - Clients receive compiled world overlays and assets; they never compile server patches.
@@ -18,12 +18,12 @@ Sourcecraft works like a Roblox-style engine and place:
 - Runs the Exocortex patch-generation agent.
 - Compiles separate server and client artifacts.
 - Distributes client artifacts and synchronizes their activation.
-- Applies the server artifact through Sourcecraft's hardcoded runtime patch mechanism.
+- Applies the server artifact through Allcraft's hardcoded runtime patch mechanism.
 
 ### Client
 
 - Does **not** run the Exocortex patch-generation agent.
-- Contains a hardcoded Sourcecraft patch receiver and runtime patch mechanism.
+- Contains a hardcoded Allcraft patch receiver and runtime patch mechanism.
 - Downloads, caches, stages, and applies compiled artifacts from the server.
 - Reports readiness before synchronized activation.
 
@@ -35,8 +35,8 @@ Sourcecraft works like a Roblox-style engine and place:
 
 ## Identity
 
-- Every Sourcecraft server generates and persists a random `serverId` UUID.
-- Every Sourcecraft world generates and persists a random `worldId` UUID.
+- Every Allcraft server generates and persists a random `serverId` UUID.
+- Every Allcraft world generates and persists a random `worldId` UUID.
 - Client caches are keyed by `serverId` and `worldId`, never by IP address.
 - The last known address may be stored as display metadata only.
 
@@ -45,7 +45,7 @@ Sourcecraft works like a Roblox-style engine and place:
 ### Server identity
 
 ```text
-sourcecraft/
+allcraft/
 └── server.json              # serverId and server metadata
 ```
 
@@ -93,7 +93,7 @@ Clients never run a Java build when joining or receiving an update.
 
 ## Revision and cache strategy
 
-- Sourcecraft's installed JAR is the static base engine.
+- Allcraft's installed JAR is the static base engine.
 - Active players normally receive small incremental revision artifacts.
 - New or far-behind players receive a cumulative overlay for the current revision.
 - A client with a compatible cached parent receives only missing increments.
@@ -116,4 +116,4 @@ The activation tick is a live protocol message, not part of the permanent revisi
 
 ## Security scope
 
-Sourcecraft intentionally grants trusted servers maximal patch capability. There is no sandbox or patch-signing permission system. Hashes and revision checks exist for synchronization and corruption detection.
+Allcraft intentionally grants trusted servers maximal patch capability. There is no sandbox or patch-signing permission system. Hashes and revision checks exist for synchronization and corruption detection.
