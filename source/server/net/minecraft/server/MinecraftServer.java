@@ -21,6 +21,7 @@ import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyPair;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -92,6 +93,9 @@ import net.minecraft.server.network.ServerConnectionListener;
 import net.minecraft.server.network.TextFilter;
 import net.minecraft.server.notifications.NotificationManager;
 import net.minecraft.server.notifications.ServerActivityMonitor;
+import net.minecraft.server.packs.FilePackResources;
+import net.minecraft.server.packs.PackLocationInfo;
+import net.minecraft.server.packs.PackResources;
 import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.repository.Pack;
 import net.minecraft.server.packs.repository.PackRepository;
@@ -364,7 +368,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
       this.clockManager.init(this);
       this.customBossEvents = this.savedDataStorage.computeIfAbsent(CustomBossEvents.TYPE);
       this.scheduledEvents = this.savedDataStorage.computeIfAbsent(TimerQueue.TYPE);
-      AllcraftPatchServer.restoreWorldArtifacts(storageSource.getLevelPath(LevelResource.ROOT));
+      AllcraftPatchServer.restoreWorldArtifacts(this, storageSource.getLevelPath(LevelResource.ROOT));
    }
 
    protected abstract boolean initServer() throws IOException;
@@ -1515,10 +1519,45 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
    }
 
    public CompletableFuture<Void> reloadResources(final Collection<String> packsToEnable) {
-      CompletableFuture<Void> result = CompletableFuture.<ImmutableList>supplyAsync(
+      CompletableFuture<List<PackResources>> packs = CompletableFuture.<List<PackResources>>supplyAsync(
             () -> packsToEnable.stream().map(this.packRepository::getPack).filter(Objects::nonNull).map(Pack::open).collect(ImmutableList.toImmutableList()),
             this
-         )
+         );
+      CompletableFuture<Void> result = this.reloadResourcesFromPacks(packs, packsToEnable);
+      if (this.isSameThread()) {
+         this.managedBlock(result::isDone);
+      }
+
+      return result;
+   }
+
+   /** Reloads ordered Allcraft data overlays asynchronously without blocking the server tick. */
+   public CompletableFuture<Void> allcraftReloadResources(final List<Path> artifactOverlays) {
+      CompletableFuture<List<PackResources>> packs = CompletableFuture.supplyAsync(() -> {
+         List<PackResources> result = new ArrayList<>();
+         this.packRepository.getSelectedPacks().stream().map(Pack::open).forEach(result::add);
+         int index = 0;
+
+         for (Path artifact : artifactOverlays) {
+            Path normalized = artifact.toAbsolutePath().normalize();
+            PackLocationInfo location = new PackLocationInfo(
+               "allcraft/" + index++ + "/" + normalized.getFileName(),
+               Component.literal("Allcraft world data overlay"),
+               PackSource.WORLD,
+               Optional.empty()
+            );
+            result.add(new FilePackResources.FileResourcesSupplier(normalized).openPrimary(location));
+         }
+
+         return result;
+      }, this.executor);
+      return this.reloadResourcesFromPacks(packs, null);
+   }
+
+   private CompletableFuture<Void> reloadResourcesFromPacks(
+      final CompletableFuture<List<PackResources>> packs, final @Nullable Collection<String> packsToEnable
+   ) {
+      return packs
          .thenCompose(
             packsToLoad -> {
                CloseableResourceManager resources = new MultiPackResourceManager(PackType.SERVER_DATA, packsToLoad);
@@ -1544,9 +1583,14 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          .thenAcceptAsync(newResources -> {
             this.resources.close();
             this.resources = newResources;
-            this.packRepository.setSelected(packsToEnable);
-            WorldDataConfiguration newConfig = new WorldDataConfiguration(getSelectedPacks(this.packRepository, true), this.worldData.enabledFeatures());
-            this.worldData.setDataConfiguration(newConfig);
+            if (packsToEnable != null) {
+               this.packRepository.setSelected(packsToEnable);
+               WorldDataConfiguration newConfig = new WorldDataConfiguration(
+                  getSelectedPacks(this.packRepository, true), this.worldData.enabledFeatures()
+               );
+               this.worldData.setDataConfiguration(newConfig);
+            }
+
             this.resources.managers.updateComponentsAndStaticRegistryTags();
             this.resources.managers.getRecipeManager().finalizeRecipeLoading(this.worldData.enabledFeatures());
             this.getPlayerList().saveAll();
@@ -1555,11 +1599,6 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
             this.structureTemplateManager.onResourceManagerReload(this.resources.resourceManager);
             this.fuelValues = FuelValues.vanillaBurnTimes(this.registries.compositeAccess(), this.worldData.enabledFeatures());
          }, this);
-      if (this.isSameThread()) {
-         this.managedBlock(result::isDone);
-      }
-
-      return result;
    }
 
    public static WorldDataConfiguration configurePackRepository(

@@ -28,9 +28,11 @@ import java.util.jar.JarFile;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientPacketListener;
+import net.minecraft.client.resources.sounds.SimpleSoundInstance;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket;
 import net.minecraft.network.protocol.common.custom.AllcraftPayloads;
+import net.minecraft.sounds.SoundEvents;
 import org.slf4j.Logger;
 
 public final class AllcraftPatchClient {
@@ -133,16 +135,43 @@ public final class AllcraftPatchClient {
             }
 
             AllcraftRuntime.ApplyResult runtimeResult = AllcraftRuntime.apply(artifact, payload.sha256());
-            applyTestArtifact(minecraft, artifact, payload);
-            writeCurrentRevision(key, payload, artifact);
-            appendResult(key, payload, artifact, runtimeResult);
-            STAGED.remove(key);
-            sendAck(
-                connection,
-                payload,
-                AllcraftPayloads.AckStatus.APPLIED,
-                "applied at server tick " + payload.activationTick() + ": " + runtimeResult.summary()
-            );
+            AllcraftClientResources.apply(
+                    minecraft, artifact, payload.serverId(), payload.worldId(), payload.revision(), payload.sha256()
+                )
+                .whenCompleteAsync((resourceResult, error) -> {
+                    if (error != null) {
+                        Throwable cause = error instanceof java.util.concurrent.CompletionException && error.getCause() != null
+                            ? error.getCause()
+                            : error;
+                        LOGGER.error("Failed to activate Allcraft resources for patch {}", payload.patchId(), cause);
+                        sendAck(connection, payload, AllcraftPayloads.AckStatus.FAILED, conciseMessage(cause));
+                        minecraft.showDebugChat(
+                            Component.literal("[Allcraft] Resource activation failed: " + conciseMessage(cause)).withStyle(ChatFormatting.RED)
+                        );
+                        return;
+                    }
+
+                    try {
+                        applyTestArtifact(minecraft, artifact, payload);
+                        writeCurrentRevision(key, payload, artifact);
+                        appendResult(key, payload, artifact, runtimeResult, resourceResult);
+                        STAGED.remove(key);
+                        sendAck(
+                            connection,
+                            payload,
+                            AllcraftPayloads.AckStatus.APPLIED,
+                            "applied at server tick "
+                                + payload.activationTick()
+                                + ": "
+                                + runtimeResult.summary()
+                                + "; "
+                                + resourceResult.summary()
+                        );
+                    } catch (Exception e) {
+                        LOGGER.error("Failed to finish Allcraft patch activation {}", payload.patchId(), e);
+                        sendAck(connection, payload, AllcraftPayloads.AckStatus.FAILED, conciseMessage(e));
+                    }
+                }, minecraft);
         } catch (Exception e) {
             LOGGER.error("Failed to activate Allcraft patch {}", payload.patchId(), e);
             sendAck(connection, payload, AllcraftPayloads.AckStatus.FAILED, conciseMessage(e));
@@ -206,6 +235,9 @@ public final class AllcraftPatchClient {
             .withStyle(ChatFormatting.AQUA);
 
         minecraft.showDebugChat(component);
+        if (control.testName().equals("live-sound")) {
+            minecraft.getSoundManager().play(SimpleSoundInstance.forUI(SoundEvents.EXPERIENCE_ORB_PICKUP, 1.0F, 1.0F));
+        }
         switch (display) {
             case "actionbar" -> minecraft.gui.hud.setOverlayMessage(component, false);
             case "title" -> {
@@ -232,7 +264,11 @@ public final class AllcraftPatchClient {
     }
 
     private static void appendResult(
-        PatchKey key, AllcraftPayloads.PatchControl control, Path artifact, AllcraftRuntime.ApplyResult runtimeResult
+        PatchKey key,
+        AllcraftPayloads.PatchControl control,
+        Path artifact,
+        AllcraftRuntime.ApplyResult runtimeResult,
+        AllcraftClientResources.ApplyResult resourceResult
     ) throws IOException {
         Path results = cacheRoot(key).resolve("test-results");
         Files.createDirectories(results);
@@ -253,6 +289,11 @@ public final class AllcraftPatchClient {
         result.addProperty("runtimeRedefineMillis", runtimeResult.redefineMillis());
         result.addProperty("runtimeGcCollections", runtimeResult.gcCollections());
         result.addProperty("runtimeGcMillis", runtimeResult.gcMillis());
+        result.addProperty("resourceReloaded", resourceResult.reloaded());
+        result.addProperty("resourceChanged", resourceResult.changedResources());
+        result.addProperty("resourceDeleted", resourceResult.deletedResources());
+        result.addProperty("resourceReloadMillis", resourceResult.reloadMillis());
+        result.addProperty("resourceNoLoadingScreen", resourceResult.noLoadingScreen());
         result.addProperty("appliedAt", Instant.now().toString());
         Files.writeString(
             results.resolve(control.testName() + ".jsonl"),
@@ -337,9 +378,9 @@ public final class AllcraftPatchClient {
         }
     }
 
-    private static String conciseMessage(Exception exception) {
-        String message = exception.getMessage();
-        return message == null ? exception.getClass().getSimpleName() : message.substring(0, Math.min(message.length(), 500));
+    private static String conciseMessage(Throwable throwable) {
+        String message = throwable.getMessage();
+        return message == null ? throwable.getClass().getSimpleName() : message.substring(0, Math.min(message.length(), 500));
     }
 
     private record PatchKey(String serverId, String worldId, String patchId, long revision) {

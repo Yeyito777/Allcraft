@@ -90,6 +90,16 @@ patches/
 - May contain changed/new classes, assets, sounds, models, shaders, and data.
 - Include a manifest describing their base, parent revision, contents, and hash.
 
+### Runtime resource application
+
+- Client artifacts are mounted as ordered resource-pack overlays; newer revisions override older revisions.
+- Texture, model, language, sound, shader, and other client-resource preparation runs on Minecraft's resource worker pool.
+- Normal resource listeners swap prepared state on the game thread without installing a `LoadingOverlay` or disconnecting the player.
+- Server `data/` overlays use Minecraft's asynchronous data reload pipeline for recipes, loot tables, tags, functions, and related data.
+- Resource deletions are represented by exact resource-pack filters, so an overlay can add, modify, or remove resources.
+- Client and server acknowledgements are sent only after resource reload and byte-level visibility checks finish.
+- Ordered resource overlays are restored with the world's other runtime artifacts when a single-player world is reopened.
+
 ### Runtime class application
 
 - The bundled Allcraft Java agent exposes JVM `Instrumentation`.

@@ -48,12 +48,12 @@ import org.slf4j.Logger;
 
 public final class AllcraftPatchServer {
     private static final List<String> NETWORK_TEST_NAMES = List.of("basic", "ordering", "payload", "cache", "timing");
-    public static final List<String> TEST_NAMES = Stream.concat(NETWORK_TEST_NAMES.stream(), AllcraftPatchCompiler.RUNTIME_TEST_NAMES.stream()).toList();
+    public static final List<String> TEST_NAMES = Stream.concat(NETWORK_TEST_NAMES.stream(), AllcraftPatchCompiler.PATCH_TEST_NAMES.stream()).toList();
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Gson COMPACT_GSON = new Gson();
     private static final int NETWORK_PATCH_COUNT = 5;
-    private static final int ACK_TIMEOUT_TICKS = 600;
+    private static final int ACK_TIMEOUT_TICKS = 1200;
     private static final ExecutorService COMPILER_EXECUTOR = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "Allcraft Compiler Coordinator");
         thread.setDaemon(true);
@@ -61,6 +61,8 @@ public final class AllcraftPatchServer {
     });
     private static final Map<MinecraftServer, TestRun> ACTIVE_TESTS = new IdentityHashMap<>();
     private static final Map<MinecraftServer, CompilationJob> COMPILING_TESTS = new IdentityHashMap<>();
+    private static final Map<MinecraftServer, ResourceRestore> PENDING_RESOURCE_RESTORES = new IdentityHashMap<>();
+    private static final Map<MinecraftServer, CompletableFuture<Void>> ACTIVE_RESOURCE_RESTORES = new IdentityHashMap<>();
 
     private AllcraftPatchServer() {
     }
@@ -82,7 +84,7 @@ public final class AllcraftPatchServer {
             return 0;
         }
 
-        boolean runtimeTest = AllcraftPatchCompiler.RUNTIME_TEST_NAMES.contains(testName);
+        boolean runtimeTest = AllcraftPatchCompiler.PATCH_TEST_NAMES.contains(testName);
         Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
         CompletableFuture<TestRun> future = CompletableFuture.supplyAsync(() -> {
             try {
@@ -104,7 +106,7 @@ public final class AllcraftPatchServer {
         return 1;
     }
 
-    public static void restoreWorldArtifacts(Path worldRoot) {
+    public static void restoreWorldArtifacts(MinecraftServer server, Path worldRoot) {
         Path patchesRoot = worldRoot.toAbsolutePath().normalize().resolve("patches");
         Path manifestPath = patchesRoot.resolve("manifest.json");
         if (!Files.isRegularFile(manifestPath)) {
@@ -118,6 +120,8 @@ public final class AllcraftPatchServer {
             boolean integratedClient = classExists("net.minecraft.client.Minecraft");
             int serverArtifacts = 0;
             int clientArtifacts = 0;
+            List<Path> serverResourceArtifacts = new ArrayList<>();
+            List<Path> clientResourceArtifacts = new ArrayList<>();
             for (int index = 0; index < patches.size(); index++) {
                 JsonObject patch = patches.get(index).getAsJsonObject();
                 long revision = patch.get("revision").getAsLong();
@@ -127,6 +131,7 @@ public final class AllcraftPatchServer {
                 if (Files.isRegularFile(serverArtifact)) {
                     AllcraftRuntime.apply(serverArtifact, hashFromManifestOrFile(patch, "serverSha256", serverArtifact));
                     serverArtifacts++;
+                    serverResourceArtifacts.add(serverArtifact);
                 }
 
                 if (integratedClient) {
@@ -134,6 +139,7 @@ public final class AllcraftPatchServer {
                     if (Files.isRegularFile(clientArtifact)) {
                         AllcraftRuntime.apply(clientArtifact, hashFromManifestOrFile(patch, "clientSha256", clientArtifact));
                         clientArtifacts++;
+                        clientResourceArtifacts.add(clientArtifact);
                     }
                 }
             }
@@ -146,12 +152,32 @@ public final class AllcraftPatchServer {
                     clientArtifacts
                 );
             }
+            if (!serverResourceArtifacts.isEmpty() || !clientResourceArtifacts.isEmpty()) {
+                PENDING_RESOURCE_RESTORES.put(server, new ResourceRestore(serverResourceArtifacts, clientResourceArtifacts));
+            }
         } catch (Exception e) {
             throw new IllegalStateException("Failed to restore Allcraft runtime artifacts for " + worldRoot, e);
         }
     }
 
     public static void tick(MinecraftServer server) {
+        CompletableFuture<Void> restoring = ACTIVE_RESOURCE_RESTORES.get(server);
+        if (restoring != null) {
+            if (!restoring.isDone()) {
+                return;
+            }
+            ACTIVE_RESOURCE_RESTORES.remove(server);
+            restoring.join();
+        }
+        ResourceRestore pendingRestore = PENDING_RESOURCE_RESTORES.remove(server);
+        if (pendingRestore != null) {
+            CompletableFuture<?> serverResources = AllcraftServerResources.restore(server, pendingRestore.serverArtifacts());
+            CompletableFuture<?> clientResources = restoreIntegratedClientResources(pendingRestore.clientArtifacts());
+            CompletableFuture<Void> future = CompletableFuture.allOf(serverResources, clientResources);
+            ACTIVE_RESOURCE_RESTORES.put(server, future);
+            return;
+        }
+
         CompilationJob compilation = COMPILING_TESTS.get(server);
         if (compilation != null) {
             if (!compilation.future().isDone()) {
@@ -219,14 +245,21 @@ public final class AllcraftPatchServer {
                 case SCHEDULED -> {
                     if (tick >= patch.activationTick) {
                         patch.serverApplyResult = AllcraftRuntime.apply(patch.serverArtifactPath, patch.serverSha256);
+                        patch.serverResourceFuture = AllcraftServerResources.apply(
+                            server, run.patchesRoot, patch.serverArtifactPath, run.testName
+                        );
                         broadcastControl(server, run, patch, AllcraftPayloads.ControlAction.ACTIVATE);
-                        commitRevision(run, patch);
                         run.phase = Phase.WAITING_FOR_APPLIED;
                         run.phaseStartedAt = tick;
                     }
                 }
                 case WAITING_FOR_APPLIED -> {
-                    if (run.appliedPlayers.containsAll(run.expectedPlayers)) {
+                    if (patch.serverResourceFuture.isCompletedExceptionally()) {
+                        patch.serverResourceFuture.join();
+                    }
+                    if (run.appliedPlayers.containsAll(run.expectedPlayers) && patch.serverResourceFuture.isDone()) {
+                        patch.serverResourceResult = patch.serverResourceFuture.join();
+                        commitRevision(run, patch);
                         if (run.patchIndex + 1 == run.patches.size()) {
                             finishTest(server, run);
                         } else {
@@ -299,15 +332,23 @@ public final class AllcraftPatchServer {
             StepSpec spec = specs.get(index);
             Map<String, byte[]> clientClasses = Map.of();
             Map<String, byte[]> serverClasses = Map.of();
+            Map<String, byte[]> clientResources = Map.of();
+            Map<String, byte[]> serverResources = Map.of();
+            List<String> deletedClientResources = List.of();
+            List<String> deletedServerResources = List.of();
             List<String> changedFiles = List.of();
             List<String> clientEntrypoints = List.of();
             List<String> serverEntrypoints = List.of();
-            if (AllcraftPatchCompiler.RUNTIME_TEST_NAMES.contains(testName)) {
+            if (AllcraftPatchCompiler.PATCH_TEST_NAMES.contains(testName)) {
                 AllcraftPatchCompiler.Build build = AllcraftPatchCompiler.compile(
                     worldRoot.resolve("source"), patchesRoot.resolve("build-cache"), testName
                 );
                 clientClasses = build.clientClasses();
                 serverClasses = build.serverClasses();
+                clientResources = build.clientResources();
+                serverResources = build.serverResources();
+                deletedClientResources = build.deletedClientResources();
+                deletedServerResources = build.deletedServerResources();
                 changedFiles = build.changedFiles();
                 clientEntrypoints = build.clientEntrypoints();
                 serverEntrypoints = build.serverEntrypoints();
@@ -318,10 +359,34 @@ public final class AllcraftPatchServer {
             }
 
             byte[] clientArtifact = createArtifact(
-                "client", testName, runId, patchId, revision, step, patchCount, spec, clientClasses, clientEntrypoints, changedFiles
+                "client",
+                testName,
+                runId,
+                patchId,
+                revision,
+                step,
+                patchCount,
+                spec,
+                clientClasses,
+                clientResources,
+                deletedClientResources,
+                clientEntrypoints,
+                changedFiles
             );
             byte[] serverArtifact = createArtifact(
-                "server", testName, runId, patchId, revision, step, patchCount, spec, serverClasses, serverEntrypoints, changedFiles
+                "server",
+                testName,
+                runId,
+                patchId,
+                revision,
+                step,
+                patchCount,
+                spec,
+                serverClasses,
+                serverResources,
+                deletedServerResources,
+                serverEntrypoints,
+                changedFiles
             );
             Patch patch = new Patch(
                 patchId,
@@ -334,7 +399,11 @@ public final class AllcraftPatchServer {
                 serverArtifact,
                 changedFiles,
                 clientClasses.size(),
-                serverClasses.size()
+                serverClasses.size(),
+                clientResources.size(),
+                serverResources.size(),
+                deletedClientResources.size(),
+                deletedServerResources.size()
             );
             patches.add(patch);
             persistPreparedPatch(patchesRoot, serverId, worldId, testName, runId, patch);
@@ -361,7 +430,10 @@ public final class AllcraftPatchServer {
                     case "timing" -> new StepSpec(
                         "title", "Timing patch delayed by " + timingDelays[step - 1] + " ticks", step * 256, timingDelays[step - 1]
                     );
-                    case "double-jump", "no-world-gen", "flying-boats", "new-class" -> new StepSpec("title", testName, 0, 20);
+                    case "double-jump", "no-world-gen", "flying-boats", "new-class",
+                        "live-texture", "live-model", "live-sound", "live-language", "live-recipe", "live-resource-delete" -> new StepSpec(
+                            "title", testName, 0, 20
+                        );
                     default -> throw new IllegalArgumentException("Unknown test " + testName);
                 }
             );
@@ -380,12 +452,14 @@ public final class AllcraftPatchServer {
         int totalSteps,
         StepSpec spec,
         Map<String, byte[]> classes,
+        Map<String, byte[]> resources,
+        List<String> deletedResources,
         List<String> entrypoints,
         List<String> changedFiles
     ) throws IOException {
         JsonObject descriptor = new JsonObject();
         descriptor.addProperty("format", 1);
-        descriptor.addProperty("kind", AllcraftPatchCompiler.RUNTIME_TEST_NAMES.contains(testName) ? "runtime-code" : "network-test");
+        descriptor.addProperty("kind", artifactKind(testName));
         descriptor.addProperty("side", side);
         descriptor.addProperty("testName", testName);
         descriptor.addProperty("runId", runId);
@@ -397,20 +471,31 @@ public final class AllcraftPatchServer {
         descriptor.addProperty("message", spec.message());
         descriptor.addProperty("fillerBytes", spec.fillerBytes());
         descriptor.addProperty("classCount", classes.size());
+        descriptor.addProperty("resourceCount", resources.size());
         JsonArray entrypointArray = new JsonArray();
         entrypoints.forEach(entrypointArray::add);
         descriptor.add("entrypoints", entrypointArray);
         JsonArray changedFileArray = new JsonArray();
         changedFiles.forEach(changedFileArray::add);
         descriptor.add("changedFiles", changedFileArray);
+        JsonArray deletedResourceArray = new JsonArray();
+        deletedResources.forEach(deletedResourceArray::add);
+        descriptor.add("deletedResources", deletedResourceArray);
 
         byte[] json = (GSON.toJson(descriptor) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
         int classBytes = classes.values().stream().mapToInt(bytes -> bytes.length).sum();
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream(json.length + spec.fillerBytes() + classBytes + 1024);
+        int resourceBytes = resources.values().stream().mapToInt(bytes -> bytes.length).sum();
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(json.length + spec.fillerBytes() + classBytes + resourceBytes + 2048);
         try (JarOutputStream jar = new JarOutputStream(bytes)) {
             writeJarEntry(jar, "META-INF/allcraft-patch.json", json);
             writeJarEntry(jar, "allcraft/test-patch.json", json);
+            if (!resources.isEmpty() || !deletedResources.isEmpty()) {
+                writeJarEntry(jar, "pack.mcmeta", createPackMetadata(testName, deletedResources));
+            }
             for (Map.Entry<String, byte[]> entry : classes.entrySet()) {
+                writeJarEntry(jar, entry.getKey(), entry.getValue());
+            }
+            for (Map.Entry<String, byte[]> entry : resources.entrySet()) {
                 writeJarEntry(jar, entry.getKey(), entry.getValue());
             }
             if (spec.fillerBytes() > 0) {
@@ -421,6 +506,30 @@ public final class AllcraftPatchServer {
         }
 
         return bytes.toByteArray();
+    }
+
+    private static byte[] createPackMetadata(String testName, List<String> deletedResources) {
+        JsonObject root = new JsonObject();
+        JsonObject pack = new JsonObject();
+        pack.addProperty("description", "Allcraft live overlay: " + testName);
+        pack.addProperty("pack_format", 1);
+        root.add("pack", pack);
+        JsonObject filter = new JsonObject();
+        JsonArray blocked = new JsonArray();
+        for (String entry : deletedResources) {
+            int typeSeparator = entry.indexOf('/');
+            int namespaceSeparator = typeSeparator < 0 ? -1 : entry.indexOf('/', typeSeparator + 1);
+            if (namespaceSeparator < 0 || namespaceSeparator + 1 >= entry.length()) {
+                throw new IllegalArgumentException("Invalid deleted resource entry " + entry);
+            }
+            JsonObject pattern = new JsonObject();
+            pattern.addProperty("namespace", "^" + java.util.regex.Pattern.quote(entry.substring(typeSeparator + 1, namespaceSeparator)) + "$");
+            pattern.addProperty("path", "^" + java.util.regex.Pattern.quote(entry.substring(namespaceSeparator + 1)) + "$");
+            blocked.add(pattern);
+        }
+        filter.add("block", blocked);
+        root.add("filter", filter);
+        return (GSON.toJson(root) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
     }
 
     private static void writeJarEntry(JarOutputStream jar, String name, byte[] data) throws IOException {
@@ -454,7 +563,7 @@ public final class AllcraftPatchServer {
         patch.serverArtifactPath = serverPath;
 
         JsonObject sourceDescriptor = new JsonObject();
-        sourceDescriptor.addProperty("kind", AllcraftPatchCompiler.RUNTIME_TEST_NAMES.contains(testName) ? "runtime-code" : "network-test");
+        sourceDescriptor.addProperty("kind", artifactKind(testName));
         sourceDescriptor.addProperty("serverId", serverId);
         sourceDescriptor.addProperty("worldId", worldId);
         sourceDescriptor.addProperty("testName", testName);
@@ -468,6 +577,10 @@ public final class AllcraftPatchServer {
         sourceDescriptor.addProperty("serverSize", patch.serverArtifact.length);
         sourceDescriptor.addProperty("clientClasses", patch.clientClassCount);
         sourceDescriptor.addProperty("serverClasses", patch.serverClassCount);
+        sourceDescriptor.addProperty("clientResources", patch.clientResourceCount);
+        sourceDescriptor.addProperty("serverResources", patch.serverResourceCount);
+        sourceDescriptor.addProperty("deletedClientResources", patch.deletedClientResourceCount);
+        sourceDescriptor.addProperty("deletedServerResources", patch.deletedServerResourceCount);
         JsonArray files = new JsonArray();
         patch.changedFiles.forEach(files::add);
         sourceDescriptor.add("changedFiles", files);
@@ -569,7 +682,7 @@ public final class AllcraftPatchServer {
         JsonObject entry = new JsonObject();
         entry.addProperty("revision", patch.revision);
         entry.addProperty("patchId", patch.patchId);
-        entry.addProperty("kind", AllcraftPatchCompiler.RUNTIME_TEST_NAMES.contains(run.testName) ? "runtime-code" : "network-test");
+        entry.addProperty("kind", artifactKind(run.testName));
         entry.addProperty("testName", run.testName);
         entry.addProperty("runId", run.runId);
         entry.addProperty("step", patch.step);
@@ -593,6 +706,7 @@ public final class AllcraftPatchServer {
         result.addProperty("serverSha256", patch.serverSha256);
         result.addProperty("activationTick", patch.activationTick);
         result.addProperty("serverRuntime", patch.serverApplyResult == null ? "not applied" : patch.serverApplyResult.summary());
+        result.addProperty("serverResources", patch.serverResourceResult == null ? "not applied" : patch.serverResourceResult.summary());
         result.addProperty("compilationMillis", run.compilationMillis);
         result.addProperty("clientCompilerCacheHit", run.clientCacheHit);
         result.addProperty("serverCompilerCacheHit", run.serverCacheHit);
@@ -637,6 +751,16 @@ public final class AllcraftPatchServer {
         server.getPlayerList().broadcastSystemMessage(Component.literal(message).withStyle(color), false);
     }
 
+    private static String artifactKind(String testName) {
+        if (AllcraftPatchCompiler.RESOURCE_TEST_NAMES.contains(testName)) {
+            return "runtime-resource";
+        }
+        if (AllcraftPatchCompiler.RUNTIME_TEST_NAMES.contains(testName)) {
+            return "runtime-code";
+        }
+        return "network-test";
+    }
+
     private static JsonObject readJson(Path path) throws IOException {
         try {
             return JsonParser.parseString(Files.readString(path, StandardCharsets.UTF_8)).getAsJsonObject();
@@ -678,6 +802,22 @@ public final class AllcraftPatchServer {
             return true;
         } catch (ClassNotFoundException e) {
             return false;
+        }
+    }
+
+    private static CompletableFuture<?> restoreIntegratedClientResources(List<Path> artifacts) {
+        if (artifacts.isEmpty() || !classExists("net.minecraft.client.Minecraft")) {
+            return CompletableFuture.completedFuture(null);
+        }
+        try {
+            ClassLoader loader = AllcraftPatchServer.class.getClassLoader();
+            Class<?> minecraftClass = Class.forName("net.minecraft.client.Minecraft", false, loader);
+            Object minecraft = minecraftClass.getMethod("getInstance").invoke(null);
+            Class<?> resourcesClass = Class.forName("net.minecraft.allcraft.AllcraftClientResources", false, loader);
+            Object result = resourcesClass.getMethod("restoreIntegrated", minecraftClass, List.class).invoke(null, minecraft, artifacts);
+            return (CompletableFuture<?>)result;
+        } catch (ReflectiveOperationException e) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Failed to restore integrated-client resources", e));
         }
     }
 
@@ -750,9 +890,15 @@ public final class AllcraftPatchServer {
         private final List<String> changedFiles;
         private final int clientClassCount;
         private final int serverClassCount;
+        private final int clientResourceCount;
+        private final int serverResourceCount;
+        private final int deletedClientResourceCount;
+        private final int deletedServerResourceCount;
         private Path serverArtifactPath;
         private long activationTick;
         private AllcraftRuntime.ApplyResult serverApplyResult;
+        private CompletableFuture<AllcraftServerResources.ApplyResult> serverResourceFuture;
+        private AllcraftServerResources.ApplyResult serverResourceResult;
 
         private Patch(
             String patchId,
@@ -765,7 +911,11 @@ public final class AllcraftPatchServer {
             byte[] serverArtifact,
             List<String> changedFiles,
             int clientClassCount,
-            int serverClassCount
+            int serverClassCount,
+            int clientResourceCount,
+            int serverResourceCount,
+            int deletedClientResourceCount,
+            int deletedServerResourceCount
         ) {
             this.patchId = patchId;
             this.revision = revision;
@@ -778,6 +928,10 @@ public final class AllcraftPatchServer {
             this.changedFiles = changedFiles;
             this.clientClassCount = clientClassCount;
             this.serverClassCount = serverClassCount;
+            this.clientResourceCount = clientResourceCount;
+            this.serverResourceCount = serverResourceCount;
+            this.deletedClientResourceCount = deletedClientResourceCount;
+            this.deletedServerResourceCount = deletedServerResourceCount;
         }
     }
 
@@ -824,5 +978,8 @@ public final class AllcraftPatchServer {
         private Patch current() {
             return this.patches.get(this.patchIndex);
         }
+    }
+
+    private record ResourceRestore(List<Path> serverArtifacts, List<Path> clientArtifacts) {
     }
 }

@@ -15,6 +15,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -28,6 +29,10 @@ import org.slf4j.Logger;
 /** Server-side compiler for real source-changing Allcraft test patches. */
 public final class AllcraftPatchCompiler {
     public static final List<String> RUNTIME_TEST_NAMES = List.of("double-jump", "no-world-gen", "flying-boats", "new-class");
+    public static final List<String> RESOURCE_TEST_NAMES = List.of(
+        "live-texture", "live-model", "live-sound", "live-language", "live-recipe", "live-resource-delete"
+    );
+    public static final List<String> PATCH_TEST_NAMES = Stream.concat(RUNTIME_TEST_NAMES.stream(), RESOURCE_TEST_NAMES.stream()).toList();
     private static final String CACHE_FORMAT = "allcraft-javac-cache-v2";
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final String LOCAL_PLAYER = "client/net/minecraft/client/player/LocalPlayer.java";
@@ -41,8 +46,8 @@ public final class AllcraftPatchCompiler {
     }
 
     public static Build compile(Path worldSource, Path workRoot, String testName) throws IOException {
-        if (!RUNTIME_TEST_NAMES.contains(testName)) {
-            throw new IOException("Unknown runtime patch test " + testName);
+        if (!PATCH_TEST_NAMES.contains(testName)) {
+            throw new IOException("Unknown source/resource patch test " + testName);
         }
 
         if (!Files.isDirectory(worldSource)) {
@@ -54,11 +59,15 @@ public final class AllcraftPatchCompiler {
             case "flying-boats" -> flyingBoatEdits(worldSource);
             case "no-world-gen" -> noWorldGenerationEdits(worldSource);
             case "new-class" -> newClassEdits(worldSource);
-            default -> throw new IOException("Unknown runtime patch test " + testName);
+            default -> List.of();
         };
+        List<ResourceEdit> resourceEdits = resourceEdits(worldSource, testName);
+        List<ResourceDeletion> resourceDeletions = resourceDeletions(worldSource, testName);
 
-        applyEdits(edits);
         try {
+            applyEdits(edits);
+            applyResourceEdits(resourceEdits);
+            applyResourceDeletions(resourceDeletions);
             List<Path> clientSources = clientSources(worldSource, testName);
             List<Path> serverSources = serverSources(worldSource, testName);
             Compilation clientCompilation = clientSources.isEmpty()
@@ -67,10 +76,22 @@ public final class AllcraftPatchCompiler {
             Compilation serverCompilation = serverSources.isEmpty()
                 ? Compilation.empty()
                 : compileJava(serverSources, workRoot.resolve("server"));
-            List<String> changedFiles = edits.stream().map(edit -> worldSource.relativize(edit.path()).toString()).sorted().toList();
+            List<String> changedFiles = Stream.concat(
+                    edits.stream().map(edit -> worldSource.relativize(edit.path()).toString()),
+                    Stream.concat(
+                        resourceEdits.stream().map(edit -> worldSource.relativize(edit.path()).toString()),
+                        resourceDeletions.stream().map(edit -> worldSource.relativize(edit.path()).toString())
+                    )
+                )
+                .sorted()
+                .toList();
             return new Build(
                 clientCompilation.classes(),
                 serverCompilation.classes(),
+                collectResources(worldSource, resourceEdits, "client/assets/", "assets/"),
+                collectResources(worldSource, resourceEdits, "server/data/", "data/"),
+                collectDeletedResources(worldSource, resourceDeletions, "client/assets/", "assets/"),
+                collectDeletedResources(worldSource, resourceDeletions, "server/data/", "data/"),
                 changedFiles,
                 clientEntrypoints(testName),
                 serverEntrypoints(testName),
@@ -81,6 +102,8 @@ public final class AllcraftPatchCompiler {
             );
         } catch (Exception e) {
             restoreEdits(edits);
+            restoreResourceEdits(resourceEdits);
+            restoreResourceDeletions(resourceDeletions);
             if (e instanceof IOException ioException) {
                 throw ioException;
             }
@@ -233,6 +256,184 @@ public final class AllcraftPatchCompiler {
         );
     }
 
+    private static List<ResourceEdit> resourceEdits(Path sourceRoot, String testName) throws IOException {
+        return switch (testName) {
+            case "live-texture" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/minecraft/textures/block/dirt.png",
+                    Base64.getDecoder()
+                        .decode("iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAJ0lEQVR42mP4z/D/PzIWEBBAwYTkGYaBAaRqQJcfDgaMpoPRdADEAACUFh+QovJGAAAAAElFTkSuQmCC")
+                )
+            );
+            case "live-model" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/minecraft/models/block/dirt.json",
+                    ("{\n"
+                            + "  \"parent\": \"minecraft:block/cube_all\",\n"
+                            + "  \"textures\": {\n"
+                            + "    \"all\": \"minecraft:block/diamond_block\"\n"
+                            + "  }\n"
+                            + "}\n")
+                        .getBytes(StandardCharsets.UTF_8)
+                )
+            );
+            case "live-sound" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/minecraft/sounds/random/orb.ogg",
+                    Files.readAllBytes(sourceRoot.resolve("client/assets/minecraft/sounds/event/mob_effects/bad_omen.ogg"))
+                )
+            );
+            case "live-language" -> List.of(
+                resourceEditExisting(sourceRoot, "client/assets/minecraft/lang/en_us.json", bytes -> {
+                    String language = new String(bytes, StandardCharsets.UTF_8);
+                    String original = "\"block.minecraft.dirt\": \"Dirt\"";
+                    String replacement = "\"block.minecraft.dirt\": \"Allcraft Live Dirt\"";
+                    if (language.contains(original)) {
+                        language = language.replace(original, replacement);
+                    } else if (!language.contains(replacement)) {
+                        throw new IllegalArgumentException("missing dirt translation");
+                    }
+                    return language.getBytes(StandardCharsets.UTF_8);
+                })
+            );
+            case "live-recipe" -> {
+                byte[] recipe = ("{\n"
+                        + "  \"type\": \"minecraft:crafting_shapeless\",\n"
+                        + "  \"category\": \"misc\",\n"
+                        + "  \"ingredients\": [\n"
+                        + "    \"minecraft:dirt\"\n"
+                        + "  ],\n"
+                        + "  \"result\": {\n"
+                        + "    \"count\": 1,\n"
+                        + "    \"id\": \"minecraft:diamond\"\n"
+                        + "  }\n"
+                        + "}\n")
+                    .getBytes(StandardCharsets.UTF_8);
+                yield List.of(
+                    resourceEditGenerated(sourceRoot, "client/data/allcraft/recipe/dirt_to_diamond.json", recipe),
+                    resourceEditGenerated(sourceRoot, "server/data/allcraft/recipe/dirt_to_diamond.json", recipe)
+                );
+            }
+            default -> List.of();
+        };
+    }
+
+    private static List<ResourceDeletion> resourceDeletions(Path sourceRoot, String testName) throws IOException {
+        if (!testName.equals("live-resource-delete")) {
+            return List.of();
+        }
+        Path path = sourceRoot.resolve("client/assets/minecraft/textures/misc/forcefield.png");
+        if (!Files.isRegularFile(path)) {
+            throw new IOException("Patch resource file is missing: " + path);
+        }
+        return List.of(new ResourceDeletion(path, Files.readAllBytes(path)));
+    }
+
+    private static ResourceEdit resourceEditExisting(Path sourceRoot, String relative, UnaryOperator<byte[]> transform) throws IOException {
+        Path path = sourceRoot.resolve(relative);
+        if (!Files.isRegularFile(path)) {
+            throw new IOException("Patch resource file is missing: " + path);
+        }
+        byte[] original = Files.readAllBytes(path);
+        byte[] updated;
+        try {
+            updated = transform.apply(original);
+        } catch (RuntimeException e) {
+            throw new IOException("Cannot apply resource patch to " + relative + ": " + e.getMessage(), e);
+        }
+        return new ResourceEdit(path, original, updated, true);
+    }
+
+    private static ResourceEdit resourceEditGenerated(Path sourceRoot, String relative, byte[] generated) throws IOException {
+        Path path = sourceRoot.resolve(relative);
+        boolean existed = Files.isRegularFile(path);
+        byte[] original = existed ? Files.readAllBytes(path) : new byte[0];
+        return new ResourceEdit(path, original, generated, existed);
+    }
+
+    private static void applyResourceEdits(List<ResourceEdit> edits) throws IOException {
+        List<ResourceEdit> written = new ArrayList<>();
+        try {
+            for (ResourceEdit edit : edits) {
+                if (!java.util.Arrays.equals(edit.updated(), edit.original()) || !edit.existed()) {
+                    writeAtomically(edit.path(), edit.updated());
+                    written.add(edit);
+                }
+            }
+        } catch (IOException e) {
+            restoreResourceEdits(written);
+            throw e;
+        }
+    }
+
+    private static void restoreResourceEdits(List<ResourceEdit> edits) {
+        for (int index = edits.size() - 1; index >= 0; index--) {
+            ResourceEdit edit = edits.get(index);
+            try {
+                if (edit.existed()) {
+                    writeAtomically(edit.path(), edit.original());
+                } else {
+                    Files.deleteIfExists(edit.path());
+                }
+            } catch (IOException restoreError) {
+                LOGGER.error("Failed to restore world resource {}", edit.path(), restoreError);
+            }
+        }
+    }
+
+    private static void applyResourceDeletions(List<ResourceDeletion> deletions) throws IOException {
+        List<ResourceDeletion> deleted = new ArrayList<>();
+        try {
+            for (ResourceDeletion deletion : deletions) {
+                if (Files.deleteIfExists(deletion.path())) {
+                    deleted.add(deletion);
+                }
+            }
+        } catch (IOException e) {
+            restoreResourceDeletions(deleted);
+            throw e;
+        }
+    }
+
+    private static void restoreResourceDeletions(List<ResourceDeletion> deletions) {
+        for (ResourceDeletion deletion : deletions) {
+            try {
+                writeAtomically(deletion.path(), deletion.original());
+            } catch (IOException restoreError) {
+                LOGGER.error("Failed to restore deleted world resource {}", deletion.path(), restoreError);
+            }
+        }
+    }
+
+    private static Map<String, byte[]> collectResources(
+        Path sourceRoot, List<ResourceEdit> edits, String sourcePrefix, String artifactPrefix
+    ) {
+        Map<String, byte[]> resources = new LinkedHashMap<>();
+        for (ResourceEdit edit : edits) {
+            String relative = sourceRoot.relativize(edit.path()).toString().replace(File.separatorChar, '/');
+            if (relative.startsWith(sourcePrefix)) {
+                resources.put(artifactPrefix + relative.substring(sourcePrefix.length()), edit.updated());
+            }
+        }
+        return Map.copyOf(resources);
+    }
+
+    private static List<String> collectDeletedResources(
+        Path sourceRoot, List<ResourceDeletion> deletions, String sourcePrefix, String artifactPrefix
+    ) {
+        List<String> resources = new ArrayList<>();
+        for (ResourceDeletion deletion : deletions) {
+            String relative = sourceRoot.relativize(deletion.path()).toString().replace(File.separatorChar, '/');
+            if (relative.startsWith(sourcePrefix)) {
+                resources.add(artifactPrefix + relative.substring(sourcePrefix.length()));
+            }
+        }
+        return List.copyOf(resources);
+    }
+
     private static String probeSource(String className, String side) {
         return "package net.minecraft.allcraft.generated;\n\n"
             + "/** A class that does not exist in the installed Allcraft JAR. */\n"
@@ -296,6 +497,12 @@ public final class AllcraftPatchCompiler {
             case "flying-boats" -> "Ride a boat: hold Space to rise and Shift to descend";
             case "no-world-gen" -> "Travel into never-generated chunks; new terrain should be empty";
             case "new-class" -> "New client and server classes were loaded and their activation methods ran";
+            case "live-texture" -> "Dirt textures should become a magenta-and-black checkerboard immediately";
+            case "live-model" -> "Dirt blocks should immediately render with the diamond-block model texture";
+            case "live-sound" -> "The automatic experience-orb preview should play the ominous-effect sound";
+            case "live-language" -> "Dirt should now be named 'Allcraft Live Dirt' in inventories";
+            case "live-recipe" -> "Craft one dirt by itself to receive one diamond";
+            case "live-resource-delete" -> "The forcefield texture should be absent from the active resource manager";
             default -> testName;
         };
     }
@@ -613,6 +820,23 @@ public final class AllcraftPatchCompiler {
         }
     }
 
+    private static void writeAtomically(Path path, byte[] content) throws IOException {
+        Files.createDirectories(path.getParent());
+        Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
+        Files.write(
+            temporary,
+            content,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE
+        );
+        try {
+            Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
     private static void deleteTree(Path root) throws IOException {
         if (!Files.exists(root)) {
             return;
@@ -639,6 +863,10 @@ public final class AllcraftPatchCompiler {
     public record Build(
         Map<String, byte[]> clientClasses,
         Map<String, byte[]> serverClasses,
+        Map<String, byte[]> clientResources,
+        Map<String, byte[]> serverResources,
+        List<String> deletedClientResources,
+        List<String> deletedServerResources,
         List<String> changedFiles,
         List<String> clientEntrypoints,
         List<String> serverEntrypoints,
@@ -656,5 +884,11 @@ public final class AllcraftPatchCompiler {
     }
 
     private record SourceEdit(Path path, String original, String updated, boolean existed) {
+    }
+
+    private record ResourceEdit(Path path, byte[] original, byte[] updated, boolean existed) {
+    }
+
+    private record ResourceDeletion(Path path, byte[] original) {
     }
 }

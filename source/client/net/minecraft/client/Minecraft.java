@@ -195,6 +195,8 @@ import net.minecraft.server.level.progress.LevelLoadListener;
 import net.minecraft.server.level.progress.LoggingLevelLoadListener;
 import net.minecraft.server.packs.PackResources;
 import net.minecraft.server.packs.PackType;
+import net.minecraft.server.packs.FilePackResources;
+import net.minecraft.server.packs.PackLocationInfo;
 import net.minecraft.server.packs.VanillaPackResources;
 import net.minecraft.server.packs.repository.FolderRepositorySource;
 import net.minecraft.server.packs.repository.PackRepository;
@@ -1014,6 +1016,31 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
 
     public CompletableFuture<Void> reloadResourcePacks() {
         return this.reloadResourcePacks(false, null);
+    }
+
+    /**
+     * Reloads the selected resource packs plus ordered Allcraft artifact overlays without
+     * installing Minecraft's blocking loading overlay. Preparation stays on the resource
+     * worker pool and the normal listeners perform their GPU/audio swaps on the game thread.
+     */
+    public CompletableFuture<Void> allcraftReloadResources(List<Path> artifactOverlays) {
+        this.resourcePackRepository.reload();
+        List<PackResources> packs = new ArrayList<>(this.resourcePackRepository.openAllSelected());
+        int index = 0;
+        for (Path artifact : artifactOverlays) {
+            Path normalized = artifact.toAbsolutePath().normalize();
+            PackLocationInfo location = new PackLocationInfo(
+                "allcraft/" + index++ + "/" + normalized.getFileName(),
+                Component.literal("Allcraft world overlay"),
+                PackSource.SERVER,
+                Optional.empty()
+            );
+            packs.add(new FilePackResources.FileResourcesSupplier(normalized).openPrimary(location));
+        }
+
+        ReloadInstance reload = this.resourceManager
+            .createReload(Util.backgroundExecutor().forName("allcraftResourceLoad"), this, RESOURCE_RELOAD_INITIAL_TASK, packs);
+        return reload.done().thenRunAsync(this.levelExtractor::allChanged, this);
     }
 
     private CompletableFuture<Void> reloadResourcePacks(boolean isRecovery, @Nullable GameLoadCookie loadCookie) {

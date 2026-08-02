@@ -25,6 +25,17 @@ The runtime tests each compile and activate one real source/bytecode patch:
 | `no-world-gen` | Redefines server chunk-generation classes | Travel into never-generated chunks; they should be empty |
 | `new-class` | Adds and invokes new client and server classes | No manual step; both entrypoints must run for `PASS` |
 
-Runtime compilation is queued in the background. Chat reports its duration and the client/server compiler-cache result. The test prints `PASS` only after every connected client acknowledges every patch.
+The resource tests edit the world's authoritative source, stream resource/data overlays, reload them without a loading screen, and verify the active bytes:
 
-Runtime tests compile from and update the active world's `source/` tree. Server results are written under the world's `patches/test-results/`; client results are written under `patches/<serverId>/<worldId>/test-results/`. Result records include redefine, total runtime, and GC timing.
+| Test | Checks | Manual verification |
+| --- | --- | --- |
+| `live-texture` | Replaces a loaded atlas texture | Exposed dirt becomes a magenta-and-black checkerboard |
+| `live-model` | Re-bakes a loaded block model | Dirt renders with the diamond-block texture |
+| `live-sound` | Replaces a loaded OGG sound | The automatic experience-orb preview plays the ominous-effect sound |
+| `live-language` | Reloads the active language table | Dirt is named “Allcraft Live Dirt” |
+| `live-recipe` | Reloads server data and synchronizes recipes | Craft one dirt by itself to receive one diamond |
+| `live-resource-delete` | Deletes a base resource through an exact overlay tombstone | No manual step; absence is checked before `PASS` |
+
+Runtime compilation is queued in the background. Chat reports its duration and the client/server compiler-cache result. The test prints `PASS` only after the server and every connected client finish code/resource activation and acknowledgement.
+
+Runtime tests compile from and update the active world's `source/` tree. Server results are written under the world's `patches/test-results/`; client results are written under `patches/<serverId>/<worldId>/test-results/`. Result records include redefine, resource-reload, total runtime, loading-screen, and GC measurements.
