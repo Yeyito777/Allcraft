@@ -33,6 +33,21 @@ public final class AllcraftServerResources {
     private AllcraftServerResources() {
     }
 
+    public static PreflightResult preflight(Path artifact) throws IOException {
+        Map<String, byte[]> resources = readResources(artifact, "data/");
+        List<String> deleted = deletedResources(artifact, "data/");
+        for (Map.Entry<String, byte[]> entry : resources.entrySet()) {
+            if (entry.getKey().endsWith(".json")) {
+                try {
+                    JsonParser.parseString(new String(entry.getValue(), StandardCharsets.UTF_8));
+                } catch (RuntimeException e) {
+                    throw new IOException("Invalid staged server JSON " + entry.getKey(), e);
+                }
+            }
+        }
+        return new PreflightResult(resources.size(), deleted.size());
+    }
+
     public static CompletableFuture<ApplyResult> apply(
         MinecraftServer server, Path patchesRoot, Path artifact, String testName
     ) throws IOException {
@@ -51,10 +66,15 @@ public final class AllcraftServerResources {
 
     public static CompletableFuture<ApplyResult> restore(MinecraftServer server, List<Path> artifacts) {
         List<Path> overlays = artifacts.stream().filter(Files::isRegularFile).filter(AllcraftServerResources::hasServerContentUnchecked).toList();
-        if (overlays.isEmpty()) {
-            return CompletableFuture.completedFuture(ApplyResult.empty());
-        }
         return reload(server, overlays, Map.of(), List.of(), "restore");
+    }
+
+    public static CompletableFuture<ApplyResult> rollback(MinecraftServer server, Path patchesRoot) {
+        try {
+            return restore(server, previousOverlays(patchesRoot));
+        } catch (IOException e) {
+            return CompletableFuture.failedFuture(e);
+        }
     }
 
     public static boolean hasServerContent(Path artifact) throws IOException {
@@ -203,5 +223,8 @@ public final class AllcraftServerResources {
                 ? this.changedResources + " resources and " + this.deletedResources + " deletions reloaded in " + this.reloadMillis + " ms"
                 : "no server resources";
         }
+    }
+
+    public record PreflightResult(int changedResources, int deletedResources) {
     }
 }

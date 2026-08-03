@@ -17,12 +17,17 @@ public final class AllcraftPayloads {
 
     public enum ControlAction {
         SCHEDULE,
-        ACTIVATE
+        ACTIVATE,
+        COMMIT,
+        FINALIZE,
+        ABORT
     }
 
     public enum AckStatus {
         READY,
         APPLIED,
+        COMMITTED,
+        ROLLED_BACK,
         FAILED
     }
 

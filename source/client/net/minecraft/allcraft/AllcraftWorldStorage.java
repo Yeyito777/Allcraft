@@ -40,6 +40,7 @@ public final class AllcraftWorldStorage {
             String serverId = loadOrCreateServerId(gameRoot);
             cloneSourceIfMissing(sourceRoot, worldRoot.resolve("source"));
             initializePatchStorage(worldRoot.resolve("patches"), serverId);
+            AllcraftRevisionBuilder.initializeBaseline(worldRoot);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to initialize Allcraft storage for world " + worldRoot, e);
         }

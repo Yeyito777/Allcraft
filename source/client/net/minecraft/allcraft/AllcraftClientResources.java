@@ -42,6 +42,30 @@ public final class AllcraftClientResources {
     private AllcraftClientResources() {
     }
 
+    /** Validates the complete client resource declaration before READY is reported. */
+    public static PreflightResult preflight(Path artifact) throws IOException {
+        Map<String, byte[]> resources = readResources(artifact, "assets/");
+        List<String> deleted = deletedResources(artifact, "assets/");
+        for (Map.Entry<String, byte[]> entry : resources.entrySet()) {
+            String name = entry.getKey();
+            byte[] bytes = entry.getValue();
+            if (name.endsWith(".json") || name.endsWith(".mcmeta")) {
+                try {
+                    JsonParser.parseString(new String(bytes, StandardCharsets.UTF_8));
+                } catch (RuntimeException e) {
+                    throw new IOException("Invalid staged JSON resource " + name, e);
+                }
+            } else if (name.endsWith(".png")) {
+                try (java.io.ByteArrayInputStream input = new java.io.ByteArrayInputStream(bytes)) {
+                    if (javax.imageio.ImageIO.read(input) == null) {
+                        throw new IOException("Invalid staged PNG resource " + name);
+                    }
+                }
+            }
+        }
+        return new PreflightResult(resources.size(), deleted.size());
+    }
+
     public static CompletableFuture<ApplyResult> apply(
         Minecraft minecraft,
         Path artifact,
@@ -56,13 +80,10 @@ public final class AllcraftClientResources {
             return CompletableFuture.completedFuture(ApplyResult.empty());
         }
 
-        Path root = cacheRoot(serverId, worldId);
-        List<Overlay> overlays = readOverlays(root);
-        overlays.removeIf(overlay -> !Files.isRegularFile(root.resolve("revisions").resolve(overlay.artifact())));
-        overlays.removeIf(overlay -> overlay.revision() == revision);
-        overlays.add(new Overlay(revision, artifact.getFileName().toString(), expectedSha256));
-        overlays.sort(Comparator.comparingLong(Overlay::revision));
-        List<Path> paths = overlays.stream().map(overlay -> root.resolve("revisions").resolve(overlay.artifact())).toList();
+        List<Path> paths = new ArrayList<>(minecraft.allcraftCaptureResourceState().artifactOverlays());
+        paths.removeIf(path -> !Files.isRegularFile(path));
+        paths.removeIf(path -> path.getFileName().equals(artifact.getFileName()));
+        paths.add(artifact);
         long startedAt = System.nanoTime();
         boolean startedWithLoadingOverlay = minecraft.gui.overlay() instanceof LoadingOverlay;
 
@@ -75,7 +96,6 @@ public final class AllcraftClientResources {
                 }
                 verifyResources(minecraft, expectedResources);
                 verifyDeletedResources(minecraft, deletedResources);
-                writeOverlays(root, serverId, worldId, overlays);
                 ApplyResult result = new ApplyResult(
                     true, expectedResources.size(), deletedResources.size(), elapsedMillis(startedAt), true
                 );
@@ -91,6 +111,22 @@ public final class AllcraftClientResources {
                 throw new CompletionException(e);
             }
         });
+    }
+
+    /** Persists the overlay index only after the server has made the revision authoritative. */
+    public static void commit(
+        String serverId, String worldId, long revision, Path artifact, String sha256, ApplyResult result
+    ) throws IOException {
+        if (!result.reloaded()) {
+            return;
+        }
+        Path root = cacheRoot(serverId, worldId);
+        List<Overlay> overlays = readOverlays(root);
+        overlays.removeIf(overlay -> !Files.isRegularFile(root.resolve("revisions").resolve(overlay.artifact())));
+        overlays.removeIf(overlay -> overlay.revision() == revision);
+        overlays.add(new Overlay(revision, artifact.getFileName().toString(), sha256));
+        overlays.sort(Comparator.comparingLong(Overlay::revision));
+        writeOverlays(root, serverId, worldId, overlays);
     }
 
     public static CompletableFuture<ApplyResult> restoreIntegrated(Minecraft minecraft, List<Path> artifacts) {
@@ -301,5 +337,8 @@ public final class AllcraftClientResources {
     }
 
     private record Overlay(long revision, String artifact, String sha256) {
+    }
+
+    public record PreflightResult(int changedResources, int deletedResources) {
     }
 }

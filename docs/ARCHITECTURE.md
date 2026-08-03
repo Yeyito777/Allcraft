@@ -128,17 +128,19 @@ Actual class redefinition still requires a short JVM safepoint. The bundled Allc
 ## Patch lifecycle
 
 1. Exocortex edits the server's world source.
-2. The server compiles the new revision.
-3. The builder compares the previous and new outputs.
-4. The builder creates separate server and client artifacts.
-5. The server stages its server artifact.
-6. Clients download and cache the client artifact.
-7. Clients report `READY` for the revision and artifact hash.
-8. The server announces `ACTIVATE <revision> AT <tick>`.
-9. Server and clients apply the artifacts at that tick.
-10. Everyone continues on the new revision on the following tick.
+2. `/allcraft apply` diffs it against the committed source snapshot.
+3. The server compiles the affected dependency closure and builds separate client/server artifacts.
+4. The server and clients validate and stage their artifacts; clients report `READY`.
+5. The server announces `ACTIVATE <revision> AT <tick>`.
+6. At that tick, peers publish classes, run migrations, and activate resource/data transactions.
+7. Peers report `APPLIED`; the server requests lifecycle `COMMIT`.
+8. Peers report `COMMITTED` while retaining rollback definitions.
+9. The server atomically advances the source snapshot and manifest, then sends `FINALIZE`.
+10. Any pre-finalization failure sends `ABORT` and restores the complete committed revision.
 
 The activation tick is a live protocol message, not part of the permanent revision manifest.
+
+See [CODE-REVISIONS.md](CODE-REVISIONS.md) for artifact, migration, retirement, rollback, and crash-recovery details.
 
 ## Security scope
 

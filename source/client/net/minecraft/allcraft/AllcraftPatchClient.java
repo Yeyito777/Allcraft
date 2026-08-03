@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.util.stream.Stream;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientPacketListener;
@@ -41,10 +42,38 @@ public final class AllcraftPatchClient {
     private static final Gson COMPACT_GSON = new Gson();
     private static final long MAX_PATCH_BYTES = 64L * 1024L * 1024L;
     private static final Map<PatchKey, IncomingPatch> INCOMING = new HashMap<>();
-    private static final Map<PatchKey, Path> STAGED = new HashMap<>();
+    private static final Map<PatchKey, StagedPatch> STAGED = new HashMap<>();
+    private static final Map<PatchKey, ActivePatch> ACTIVE = new HashMap<>();
+    private static final Map<PatchKey, ActivePatch> COMMITTED = new HashMap<>();
     private static final Map<PatchKey, AllcraftPayloads.PatchControl> SCHEDULED = new HashMap<>();
 
     private AllcraftPatchClient() {
+    }
+
+    /** Reconciles process-lifetime JVM/resource state when leaving any remote or integrated world. */
+    public static void disconnect(Minecraft minecraft) {
+        for (ActivePatch active : Stream.concat(ACTIVE.values().stream(), COMMITTED.values().stream()).toList()) {
+            try {
+                active.runtime.rollback();
+            } catch (Exception e) {
+                LOGGER.error("Failed to roll back an in-flight Allcraft client transaction on disconnect", e);
+            }
+        }
+        ACTIVE.clear();
+        COMMITTED.clear();
+        STAGED.clear();
+        SCHEDULED.clear();
+        INCOMING.clear();
+        try {
+            AllcraftRuntime.resetToBase();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to reconcile Allcraft classes on disconnect", e);
+        }
+        minecraft.allcraftRestoreResourceState(new Minecraft.AllcraftResourceState(java.util.List.of(), java.util.Set.of()))
+            .exceptionally(failure -> {
+                LOGGER.error("Failed to restore base resources on disconnect", failure);
+                return null;
+            });
     }
 
     public static void handleChunk(Minecraft minecraft, ClientPacketListener connection, AllcraftPayloads.PatchChunk payload) {
@@ -80,8 +109,15 @@ public final class AllcraftPatchClient {
 
             Path artifactPath = cacheArtifact(key, payload.testName(), payload.step(), payload.totalSteps(), payload.sha256(), artifact);
             INCOMING.remove(key);
-            STAGED.put(key, artifactPath);
-            sendAck(connection, payload, AllcraftPayloads.AckStatus.READY, "cached " + artifact.length + " bytes");
+            AllcraftRuntime.Transaction runtime = AllcraftRuntime.stage(artifactPath, payload.sha256());
+            AllcraftClientResources.PreflightResult resources = AllcraftClientResources.preflight(artifactPath);
+            STAGED.put(key, new StagedPatch(artifactPath, runtime, minecraft.allcraftCaptureResourceState(), resources));
+            sendAck(
+                connection,
+                payload,
+                AllcraftPayloads.AckStatus.READY,
+                "staged " + artifact.length + " bytes, " + resources.changedResources() + " resource(s)"
+            );
             minecraft.showDebugChat(
                 Component.literal(
                         "[Allcraft] READY "
@@ -106,12 +142,26 @@ public final class AllcraftPatchClient {
         try {
             PatchKey key = PatchKey.from(payload.serverId(), payload.worldId(), payload.patchId(), payload.revision());
             validateHash(payload.sha256());
-            Path artifact = STAGED.getOrDefault(key, artifactPath(key));
+            if (payload.action() == AllcraftPayloads.ControlAction.ABORT) {
+                abort(minecraft, connection, key, payload);
+                return;
+            }
+            StagedPatch staged = STAGED.get(key);
+            Path artifact = staged == null ? artifactPath(key) : staged.artifact;
             if (!Files.isRegularFile(artifact) || !sha256(artifact).equals(payload.sha256())) {
                 throw new IOException("Staged artifact is missing or does not match its hash");
             }
 
             if (payload.action() == AllcraftPayloads.ControlAction.SCHEDULE) {
+                if (staged == null) {
+                    staged = new StagedPatch(
+                        artifact,
+                        AllcraftRuntime.stage(artifact, payload.sha256()),
+                        minecraft.allcraftCaptureResourceState(),
+                        AllcraftClientResources.preflight(artifact)
+                    );
+                    STAGED.put(key, staged);
+                }
                 SCHEDULED.put(key, payload);
                 minecraft.showDebugChat(
                     Component.literal(
@@ -129,12 +179,51 @@ public final class AllcraftPatchClient {
                 return;
             }
 
+            if (payload.action() == AllcraftPayloads.ControlAction.COMMIT) {
+                ActivePatch active = ACTIVE.get(key);
+                if (active == null) {
+                    throw new IOException("No published transaction is waiting for commit");
+                }
+                active.runtime.finish();
+                ACTIVE.remove(key);
+                COMMITTED.put(key, active);
+                sendAck(connection, payload, AllcraftPayloads.AckStatus.COMMITTED, "revision committed");
+                return;
+            }
+
+            if (payload.action() == AllcraftPayloads.ControlAction.FINALIZE) {
+                ActivePatch active = COMMITTED.remove(key);
+                if (active == null) {
+                    throw new IOException("No committed transaction is waiting for finalization");
+                }
+                try {
+                    AllcraftClientResources.commit(
+                        payload.serverId(), payload.worldId(), payload.revision(), active.artifact, payload.sha256(), active.resourceResult
+                    );
+                    writeCurrentRevision(key, payload, active.artifact);
+                    appendResult(key, payload, active.artifact, active.runtimeResult, active.resourceResult);
+                } catch (IOException metadataFailure) {
+                    // The server manifest is already authoritative at FINALIZE. A local metadata
+                    // write can be reconstructed on reconnect and must never undo committed code.
+                    LOGGER.error("Failed to persist finalized Allcraft client metadata for {}", payload.patchId(), metadataFailure);
+                } finally {
+                    active.runtime.seal();
+                    STAGED.remove(key);
+                }
+                return;
+            }
+
             AllcraftPayloads.PatchControl schedule = SCHEDULED.remove(key);
             if (schedule == null || schedule.activationTick() != payload.activationTick()) {
                 throw new IOException("Patch activation did not match its schedule");
             }
+            if (staged == null) {
+                throw new IOException("Patch was not staged before activation");
+            }
 
-            AllcraftRuntime.ApplyResult runtimeResult = AllcraftRuntime.apply(artifact, payload.sha256());
+            AllcraftRuntime.ApplyResult runtimeResult = staged.runtime.publish();
+            StagedPatch activation = staged;
+            ACTIVE.put(key, new ActivePatch(artifact, activation.runtime, activation.resourcesBefore, runtimeResult, null));
             AllcraftClientResources.apply(
                     minecraft, artifact, payload.serverId(), payload.worldId(), payload.revision(), payload.sha256()
                 )
@@ -143,24 +232,21 @@ public final class AllcraftPatchClient {
                         Throwable cause = error instanceof java.util.concurrent.CompletionException && error.getCause() != null
                             ? error.getCause()
                             : error;
-                        LOGGER.error("Failed to activate Allcraft resources for patch {}", payload.patchId(), cause);
-                        sendAck(connection, payload, AllcraftPayloads.AckStatus.FAILED, conciseMessage(cause));
-                        minecraft.showDebugChat(
-                            Component.literal("[Allcraft] Resource activation failed: " + conciseMessage(cause)).withStyle(ChatFormatting.RED)
-                        );
+                        failAndRollback(minecraft, connection, key, payload, activation, cause, "Resource activation failed");
                         return;
                     }
 
                     try {
                         applyTestArtifact(minecraft, artifact, payload);
-                        writeCurrentRevision(key, payload, artifact);
-                        appendResult(key, payload, artifact, runtimeResult, resourceResult);
-                        STAGED.remove(key);
+                        ACTIVE.put(
+                            key,
+                            new ActivePatch(artifact, activation.runtime, activation.resourcesBefore, runtimeResult, resourceResult)
+                        );
                         sendAck(
                             connection,
                             payload,
                             AllcraftPayloads.AckStatus.APPLIED,
-                            "applied at server tick "
+                            "published at server tick "
                                 + payload.activationTick()
                                 + ": "
                                 + runtimeResult.summary()
@@ -168,15 +254,74 @@ public final class AllcraftPatchClient {
                                 + resourceResult.summary()
                         );
                     } catch (Exception e) {
-                        LOGGER.error("Failed to finish Allcraft patch activation {}", payload.patchId(), e);
-                        sendAck(connection, payload, AllcraftPayloads.AckStatus.FAILED, conciseMessage(e));
+                        failAndRollback(minecraft, connection, key, payload, activation, e, "Patch activation failed");
                     }
                 }, minecraft);
         } catch (Exception e) {
+            PatchKey key = new PatchKey(payload.serverId(), payload.worldId(), payload.patchId(), payload.revision());
+            StagedPatch failed = STAGED.get(key);
+            if (failed != null && failed.runtime.started()) {
+                failAndRollback(minecraft, connection, key, payload, failed, e, "Patch activation failed");
+                return;
+            }
             LOGGER.error("Failed to activate Allcraft patch {}", payload.patchId(), e);
             sendAck(connection, payload, AllcraftPayloads.AckStatus.FAILED, conciseMessage(e));
             minecraft.showDebugChat(Component.literal("[Allcraft] Patch activation failed: " + conciseMessage(e)).withStyle(ChatFormatting.RED));
         }
+    }
+
+    private static void failAndRollback(
+        Minecraft minecraft,
+        ClientPacketListener connection,
+        PatchKey key,
+        AllcraftPayloads.PatchControl payload,
+        StagedPatch staged,
+        Throwable failure,
+        String display
+    ) {
+        ACTIVE.remove(key);
+        COMMITTED.remove(key);
+        try {
+            staged.runtime.rollback();
+        } catch (Exception rollbackError) {
+            failure.addSuppressed(rollbackError);
+        }
+        minecraft.allcraftRestoreResourceState(staged.resourcesBefore).whenCompleteAsync((unused, restoreFailure) -> {
+            if (restoreFailure != null) {
+                failure.addSuppressed(restoreFailure);
+            }
+            LOGGER.error("{} for Allcraft patch {}", display, payload.patchId(), failure);
+            sendAck(connection, payload, AllcraftPayloads.AckStatus.FAILED, conciseMessage(failure));
+            minecraft.showDebugChat(Component.literal("[Allcraft] " + display + ": " + conciseMessage(failure)).withStyle(ChatFormatting.RED));
+        }, minecraft);
+    }
+
+    private static void abort(
+        Minecraft minecraft, ClientPacketListener connection, PatchKey key, AllcraftPayloads.PatchControl payload
+    ) {
+        ActivePatch active = ACTIVE.remove(key);
+        if (active == null) {
+            active = COMMITTED.remove(key);
+        }
+        STAGED.remove(key);
+        SCHEDULED.remove(key);
+        if (active == null) {
+            sendAck(connection, payload, AllcraftPayloads.AckStatus.ROLLED_BACK, "staged transaction discarded");
+            return;
+        }
+        ActivePatch rollback = active;
+        try {
+            rollback.runtime.rollback();
+        } catch (Exception e) {
+            LOGGER.error("Failed to roll back Allcraft classes for {}", payload.patchId(), e);
+        }
+        minecraft.allcraftRestoreResourceState(rollback.resourcesBefore).whenCompleteAsync((unused, failure) -> {
+            if (failure != null) {
+                sendAck(connection, payload, AllcraftPayloads.AckStatus.FAILED, "rollback failed: " + conciseMessage(failure));
+            } else {
+                sendAck(connection, payload, AllcraftPayloads.AckStatus.ROLLED_BACK, "published transaction rolled back");
+            }
+        }, minecraft);
     }
 
     private static Path cacheArtifact(PatchKey key, String testName, int step, int totalSteps, String hash, byte[] artifact) throws IOException {
@@ -209,7 +354,10 @@ public final class AllcraftPatchClient {
         try (JarFile jar = new JarFile(artifact.toFile())) {
             JarEntry entry = jar.getJarEntry("allcraft/test-patch.json");
             if (entry == null) {
-                throw new IOException("Artifact has no Allcraft test patch descriptor");
+                minecraft.showDebugChat(
+                    Component.literal("[Allcraft] Published source revision " + control.revision()).withStyle(ChatFormatting.AQUA)
+                );
+                return;
             }
 
             try (Reader reader = new InputStreamReader(jar.getInputStream(entry), StandardCharsets.UTF_8)) {
@@ -399,6 +547,23 @@ public final class AllcraftPatchClient {
 
             return new PatchKey(serverId, worldId, patchId, revision);
         }
+    }
+
+    private record StagedPatch(
+        Path artifact,
+        AllcraftRuntime.Transaction runtime,
+        Minecraft.AllcraftResourceState resourcesBefore,
+        AllcraftClientResources.PreflightResult preflight
+    ) {
+    }
+
+    private record ActivePatch(
+        Path artifact,
+        AllcraftRuntime.Transaction runtime,
+        Minecraft.AllcraftResourceState resourcesBefore,
+        AllcraftRuntime.ApplyResult runtimeResult,
+        AllcraftClientResources.ApplyResult resourceResult
+    ) {
     }
 
     private static final class IncomingPatch {

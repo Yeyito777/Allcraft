@@ -1051,6 +1051,14 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
         return result;
     }
 
+    public AllcraftResourceState allcraftCaptureResourceState() {
+        return new AllcraftResourceState(List.copyOf(this.allcraftArtifactOverlays), Set.copyOf(this.allcraftActiveResourceIds));
+    }
+
+    public CompletableFuture<Void> allcraftRestoreResourceState(AllcraftResourceState state) {
+        return this.allcraftReloadResources(state.artifactOverlays(), state.activeResources(), Set.of());
+    }
+
     /** Installs an Allcraft overlay stack and updates only consumers affected by this revision. */
     public CompletableFuture<Void> allcraftReloadResources(
         List<Path> artifactOverlays, Set<Identifier> changedResources, Set<Identifier> deletedResources
@@ -1338,6 +1346,13 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
             this.levelExtractor.allcraftScheduleSeamlessSectionRebuilds();
             LOGGER.info("Allcraft full fallback completed in {} ms", (System.nanoTime() - startedAt) / 1_000_000L);
         }, this);
+    }
+
+    public record AllcraftResourceState(List<Path> artifactOverlays, Set<Identifier> activeResources) {
+        public AllcraftResourceState {
+            artifactOverlays = List.copyOf(artifactOverlays);
+            activeResources = Set.copyOf(activeResources);
+        }
     }
 
     private CompletableFuture<Void> reloadResourcePacks(boolean isRecovery, @Nullable GameLoadCookie loadCookie) {

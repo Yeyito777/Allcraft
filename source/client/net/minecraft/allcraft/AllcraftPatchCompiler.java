@@ -117,6 +117,42 @@ public final class AllcraftPatchCompiler {
         }
     }
 
+    /**
+     * Applies a named test's source fixture only. The production revision differ/compiler then
+     * discovers and builds these edits exactly as it does arbitrary externally edited source.
+     */
+    public static Fixture applyFixture(Path worldSource, String testName) throws IOException {
+        if (!PATCH_TEST_NAMES.contains(testName)) {
+            throw new IOException("Unknown source/resource patch fixture " + testName);
+        }
+        if (!Files.isDirectory(worldSource)) {
+            throw new IOException("World source directory is missing: " + worldSource);
+        }
+        List<SourceEdit> edits = switch (testName) {
+            case "double-jump" -> doubleJumpEdits(worldSource);
+            case "flying-boats" -> flyingBoatEdits(worldSource);
+            case "no-world-gen" -> noWorldGenerationEdits(worldSource);
+            case "new-class" -> newClassEdits(worldSource);
+            default -> List.of();
+        };
+        List<ResourceEdit> resourceEdits = resourceEdits(worldSource, testName);
+        List<ResourceDeletion> resourceDeletions = resourceDeletions(worldSource, testName);
+        try {
+            applyEdits(edits);
+            applyResourceEdits(resourceEdits);
+            applyResourceDeletions(resourceDeletions);
+            return new Fixture(instructions(testName), clientEntrypoints(testName), serverEntrypoints(testName));
+        } catch (Exception e) {
+            restoreEdits(edits);
+            restoreResourceEdits(resourceEdits);
+            restoreResourceDeletions(resourceDeletions);
+            if (e instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw new IOException("Failed to apply source fixture " + testName, e);
+        }
+    }
+
     private static List<SourceEdit> doubleJumpEdits(Path sourceRoot) throws IOException {
         List<SourceEdit> edits = new ArrayList<>();
         edits.add(
@@ -1027,6 +1063,9 @@ public final class AllcraftPatchCompiler {
         boolean serverCacheHit,
         long compilationMillis
     ) {
+    }
+
+    public record Fixture(String instructions, List<String> clientEntrypoints, List<String> serverEntrypoints) {
     }
 
     private record Compilation(Map<String, byte[]> classes, boolean cacheHit, long elapsedMillis) {

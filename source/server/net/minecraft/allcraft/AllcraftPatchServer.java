@@ -6,7 +6,6 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mojang.logging.LogUtils;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -25,16 +24,12 @@ import java.util.HexFormat;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.jar.JarEntry;
-import java.util.jar.JarOutputStream;
-import java.util.zip.CRC32;
 import java.util.stream.Stream;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
@@ -106,6 +101,35 @@ public final class AllcraftPatchServer {
         return 1;
     }
 
+    /** Production entrypoint: build whatever has changed in the authoritative world source. */
+    public static int startApply(CommandSourceStack source, String label) {
+        MinecraftServer server = source.getServer();
+        if (ACTIVE_TESTS.containsKey(server) || COMPILING_TESTS.containsKey(server)) {
+            source.sendFailure(Component.literal("An Allcraft revision is already running"));
+            return 0;
+        }
+        if (server.getPlayerList().getPlayerCount() == 0) {
+            source.sendFailure(Component.literal("At least one client must be connected to publish an Allcraft revision"));
+            return 0;
+        }
+        Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
+        CompletableFuture<TestRun> future = CompletableFuture.supplyAsync(() -> {
+            try {
+                AllcraftRevisionBuilder.PreparedRevision prepared = AllcraftRevisionBuilder.prepare(
+                    worldRoot, AllcraftRevisionBuilder.Request.production(label)
+                );
+                return runFromPrepared(worldRoot, prepared, 1);
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        }, COMPILER_EXECUTOR);
+        COMPILING_TESTS.put(server, new CompilationJob(label, future));
+        source.sendSuccess(
+            () -> Component.literal("Queued arbitrary world-source revision '" + label + "'").withStyle(ChatFormatting.AQUA), false
+        );
+        return 1;
+    }
+
     public static void restoreWorldArtifacts(MinecraftServer server, Path worldRoot) {
         Path patchesRoot = worldRoot.toAbsolutePath().normalize().resolve("patches");
         Path manifestPath = patchesRoot.resolve("manifest.json");
@@ -114,6 +138,30 @@ public final class AllcraftPatchServer {
         }
 
         try {
+            Path interrupted = patchesRoot.resolve("transaction.json");
+            if (Files.isRegularFile(interrupted)) {
+                JsonObject transaction = readJson(interrupted);
+                String phase = transaction.has("phase") ? transaction.get("phase").getAsString() : "unknown";
+                LOGGER.warn(
+                    "Recovering interrupted Allcraft transaction {} in phase {}; committed manifest remains authoritative",
+                    transaction.has("patchId") ? transaction.get("patchId").getAsString() : "unknown",
+                    phase
+                );
+                if ((phase.equals("publishing") || phase.equals("committing") || phase.equals("rolling-back"))
+                    && transaction.has("serverSha256")
+                    && transaction.has("revision")
+                    && transaction.has("patchId")) {
+                    Path interruptedArtifact = patchesRoot.resolve("artifacts/server").resolve(
+                        String.format(
+                            "%08d-%s.jar", transaction.get("revision").getAsLong(), transaction.get("patchId").getAsString()
+                        )
+                    );
+                    if (Files.isRegularFile(interruptedArtifact)) {
+                        AllcraftRuntime.recoverRollback(interruptedArtifact, transaction.get("serverSha256").getAsString());
+                    }
+                }
+                Files.deleteIfExists(interrupted);
+            }
             AllcraftRuntime.resetToBase();
             JsonObject manifest = readJson(manifestPath);
             JsonArray patches = manifest.has("patches") ? manifest.getAsJsonArray("patches") : new JsonArray();
@@ -226,6 +274,7 @@ public final class AllcraftPatchServer {
                         broadcastControl(server, run, patch, AllcraftPayloads.ControlAction.SCHEDULE);
                         run.phase = Phase.SCHEDULED;
                         run.phaseStartedAt = tick;
+                        writeTransactionState(run, patch, "scheduled", null);
                         announce(
                             server,
                             "[Allcraft] "
@@ -233,7 +282,7 @@ public final class AllcraftPatchServer {
                                 + " "
                                 + patch.step
                                 + "/"
-                                + run.patches.size()
+                                + run.totalSteps
                                 + " READY; activation scheduled for server tick "
                                 + patch.activationTick,
                             ChatFormatting.GRAY
@@ -244,7 +293,11 @@ public final class AllcraftPatchServer {
                 }
                 case SCHEDULED -> {
                     if (tick >= patch.activationTick) {
-                        patch.serverApplyResult = AllcraftRuntime.apply(patch.serverArtifactPath, patch.serverSha256);
+                        writeTransactionState(run, patch, "publishing", null);
+                        if (patch.serverTransaction == null) {
+                            patch.serverTransaction = AllcraftRuntime.stage(patch.serverArtifactPath, patch.serverSha256);
+                        }
+                        patch.serverApplyResult = patch.serverTransaction.publish();
                         patch.serverResourceFuture = AllcraftServerResources.apply(
                             server, run.patchesRoot, patch.serverArtifactPath, run.testName
                         );
@@ -259,28 +312,77 @@ public final class AllcraftPatchServer {
                     }
                     if (run.appliedPlayers.containsAll(run.expectedPlayers) && patch.serverResourceFuture.isDone()) {
                         patch.serverResourceResult = patch.serverResourceFuture.join();
-                        commitRevision(run, patch);
-                        if (run.patchIndex + 1 == run.patches.size()) {
-                            finishTest(server, run);
-                        } else {
-                            run.patchIndex++;
-                            run.phase = Phase.BETWEEN_PATCHES;
-                            run.nextStageTick = tick + 10L;
-                            run.readyPlayers.clear();
-                            run.appliedPlayers.clear();
+                        if (patch.serverTransaction != null) {
+                            patch.serverTransaction.finish();
                         }
+                        writeTransactionState(run, patch, "committing", null);
+                        broadcastControl(server, run, patch, AllcraftPayloads.ControlAction.COMMIT);
+                        run.phase = Phase.WAITING_FOR_COMMITTED;
+                        run.phaseStartedAt = tick;
                     } else {
                         checkTimeout(server, run, tick, "APPLIED");
                     }
                 }
+                case WAITING_FOR_COMMITTED -> {
+                    if (run.committedPlayers.containsAll(run.expectedPlayers)) {
+                        commitRevision(run, patch);
+                        if (patch.serverTransaction != null) {
+                            patch.serverTransaction.seal();
+                        }
+                        broadcastControl(server, run, patch, AllcraftPayloads.ControlAction.FINALIZE);
+                        clearTransactionState(run);
+                        if (patch.step >= run.totalSteps) {
+                            finishTest(server, run);
+                        } else {
+                            run.phase = Phase.BETWEEN_PATCHES;
+                            run.readyPlayers.clear();
+                            run.appliedPlayers.clear();
+                            run.committedPlayers.clear();
+                            run.nextPatchFuture = CompletableFuture.supplyAsync(() -> {
+                                try {
+                                    return prepareNextFixture(run, patch.step + 1);
+                                } catch (IOException e) {
+                                    throw new CompletionException(e);
+                                }
+                            }, COMPILER_EXECUTOR);
+                        }
+                    } else {
+                        checkTimeout(server, run, tick, "COMMITTED");
+                    }
+                }
+                case WAITING_FOR_ROLLBACK -> {
+                    if (patch.serverResourceFuture != null && patch.serverResourceFuture.isCompletedExceptionally()) {
+                        patch.serverResourceFuture.join();
+                    }
+                    boolean resourcesDone = patch.serverResourceFuture == null || patch.serverResourceFuture.isDone();
+                    if (resourcesDone && run.rollbackPlayers.containsAll(run.expectedPlayers)) {
+                        failTest(server, run, run.failureReason == null ? "transaction rolled back" : run.failureReason);
+                    } else {
+                        checkTimeout(server, run, tick, "ROLLBACK");
+                    }
+                }
                 case BETWEEN_PATCHES -> {
-                    if (tick >= run.nextStageTick) {
+                    if (run.nextPatchFuture != null && run.nextPatchFuture.isDone()) {
+                        Patch next;
+                        try {
+                            next = run.nextPatchFuture.join();
+                        } catch (CompletionException failure) {
+                            Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+                            failTest(server, run, "next revision did not compile: " + conciseMessage(cause));
+                            return;
+                        }
+                        run.nextPatchFuture = null;
+                        run.patches.add(next);
+                        run.patchIndex++;
+                        run.clientCacheHit &= next.clientCacheHit;
+                        run.serverCacheHit &= next.serverCacheHit;
+                        run.compilationMillis += next.compilationMillis;
                         stageCurrentPatch(server, run);
                     }
                 }
             }
         } catch (Exception e) {
-            failTest(server, run, conciseMessage(e));
+            abortRun(server, run, conciseMessage(e));
             LOGGER.error("Allcraft patch test {} failed", run.testName, e);
         }
     }
@@ -302,116 +404,138 @@ public final class AllcraftPatchServer {
         }
 
         if (ack.status() == AllcraftPayloads.AckStatus.FAILED) {
-            failTest(server, run, player.getName().getString() + " reported failure: " + ack.message());
+            abortRun(server, run, player.getName().getString() + " reported failure: " + ack.message());
         } else if (ack.status() == AllcraftPayloads.AckStatus.READY && run.phase == Phase.WAITING_FOR_READY) {
             run.readyPlayers.add(player.getUUID());
         } else if (ack.status() == AllcraftPayloads.AckStatus.APPLIED && run.phase == Phase.WAITING_FOR_APPLIED) {
             run.appliedPlayers.add(player.getUUID());
+        } else if (ack.status() == AllcraftPayloads.AckStatus.COMMITTED && run.phase == Phase.WAITING_FOR_COMMITTED) {
+            run.committedPlayers.add(player.getUUID());
+        } else if (ack.status() == AllcraftPayloads.AckStatus.ROLLED_BACK && run.phase == Phase.WAITING_FOR_ROLLBACK) {
+            run.rollbackPlayers.add(player.getUUID());
         }
     }
 
     private static TestRun prepareTest(Path worldRoot, String testName) throws IOException {
-        Path patchesRoot = worldRoot.resolve("patches");
-        Path manifestPath = patchesRoot.resolve("manifest.json");
-        JsonObject manifest = readJson(manifestPath);
-        String serverId = requireUuid(manifest, "serverId", manifestPath);
-        String worldId = requireUuid(manifest, "worldId", manifestPath);
-        long baseRevision = manifest.get("currentRevision").getAsLong();
         String runId = UUID.randomUUID().toString();
         int patchCount = NETWORK_TEST_NAMES.contains(testName) ? NETWORK_PATCH_COUNT : 1;
-        List<StepSpec> specs = specs(testName, patchCount);
-        List<Patch> patches = new ArrayList<>(patchCount);
-        boolean clientCacheHit = true;
-        boolean serverCacheHit = true;
-        long compilationMillis = 0L;
-
-        for (int index = 0; index < patchCount; index++) {
-            int step = index + 1;
-            long revision = baseRevision + step;
-            String patchId = UUID.randomUUID().toString();
-            StepSpec spec = specs.get(index);
-            Map<String, byte[]> clientClasses = Map.of();
-            Map<String, byte[]> serverClasses = Map.of();
-            Map<String, byte[]> clientResources = Map.of();
-            Map<String, byte[]> serverResources = Map.of();
-            List<String> deletedClientResources = List.of();
-            List<String> deletedServerResources = List.of();
-            List<String> changedFiles = List.of();
-            List<String> clientEntrypoints = List.of();
-            List<String> serverEntrypoints = List.of();
-            if (AllcraftPatchCompiler.PATCH_TEST_NAMES.contains(testName)) {
-                AllcraftPatchCompiler.Build build = AllcraftPatchCompiler.compile(
-                    worldRoot.resolve("source"), patchesRoot.resolve("build-cache"), testName
-                );
-                clientClasses = build.clientClasses();
-                serverClasses = build.serverClasses();
-                clientResources = build.clientResources();
-                serverResources = build.serverResources();
-                deletedClientResources = build.deletedClientResources();
-                deletedServerResources = build.deletedServerResources();
-                changedFiles = build.changedFiles();
-                clientEntrypoints = build.clientEntrypoints();
-                serverEntrypoints = build.serverEntrypoints();
-                spec = new StepSpec("title", build.instructions(), 0, 20);
-                clientCacheHit &= build.clientCacheHit();
-                serverCacheHit &= build.serverCacheHit();
-                compilationMillis += build.compilationMillis();
-            }
-
-            byte[] clientArtifact = createArtifact(
-                "client",
-                testName,
-                runId,
-                patchId,
-                revision,
-                step,
-                patchCount,
-                spec,
-                clientClasses,
-                clientResources,
-                deletedClientResources,
-                clientEntrypoints,
-                changedFiles
+        StepSpec spec = specs(testName, patchCount).getFirst();
+        AllcraftRevisionBuilder.initializeBaseline(worldRoot);
+        if (AllcraftPatchCompiler.PATCH_TEST_NAMES.contains(testName)) {
+            AllcraftPatchCompiler.Fixture fixture = AllcraftPatchCompiler.applyFixture(worldRoot.resolve("source"), testName);
+            spec = new StepSpec(spec.display(), fixture.instructions(), spec.fillerBytes(), spec.activationDelayTicks());
+            writeTestFixture(worldRoot.resolve("source"), testName, runId, 1, patchCount, spec);
+            AllcraftRevisionBuilder.PreparedRevision prepared = prepareFixture(
+                worldRoot, testName, runId, 1, patchCount, spec, fixture.clientEntrypoints(), fixture.serverEntrypoints()
             );
-            byte[] serverArtifact = createArtifact(
-                "server",
-                testName,
-                runId,
-                patchId,
-                revision,
-                step,
-                patchCount,
-                spec,
-                serverClasses,
-                serverResources,
-                deletedServerResources,
-                serverEntrypoints,
-                changedFiles
-            );
-            Patch patch = new Patch(
-                patchId,
-                revision,
-                step,
-                spec,
-                sha256(clientArtifact),
-                sha256(serverArtifact),
-                clientArtifact,
-                serverArtifact,
-                changedFiles,
-                clientClasses.size(),
-                serverClasses.size(),
-                clientResources.size(),
-                serverResources.size(),
-                deletedClientResources.size(),
-                deletedServerResources.size()
-            );
-            patches.add(patch);
-            persistPreparedPatch(patchesRoot, serverId, worldId, testName, runId, patch);
+            return runFromPrepared(worldRoot, prepared, patchCount);
         }
-
-        return new TestRun(
-            testName, runId, serverId, worldId, patches, patchesRoot, clientCacheHit, serverCacheHit, compilationMillis
+        writeTestFixture(worldRoot.resolve("source"), testName, runId, 1, patchCount, spec);
+        AllcraftRevisionBuilder.PreparedRevision prepared = prepareFixture(
+            worldRoot, testName, runId, 1, patchCount, spec, List.of(), List.of()
         );
+        return runFromPrepared(worldRoot, prepared, patchCount);
+    }
+
+    private static AllcraftRevisionBuilder.PreparedRevision prepareFixture(
+        Path worldRoot,
+        String testName,
+        String runId,
+        int step,
+        int totalSteps,
+        StepSpec spec,
+        List<String> clientEntrypoints,
+        List<String> serverEntrypoints
+    ) throws IOException {
+        return AllcraftRevisionBuilder.prepare(
+            worldRoot,
+            AllcraftRevisionBuilder.Request.test(
+                testName,
+                spec.display(),
+                spec.message(),
+                spec.fillerBytes(),
+                step,
+                totalSteps,
+                runId,
+                clientEntrypoints,
+                serverEntrypoints
+            )
+        );
+    }
+
+    private static Patch prepareNextFixture(TestRun run, int step) throws IOException {
+        StepSpec spec = specs(run.testName, run.totalSteps).get(step - 1);
+        writeTestFixture(run.worldRoot.resolve("source"), run.testName, run.runId, step, run.totalSteps, spec);
+        return patchFromPrepared(
+            prepareFixture(run.worldRoot, run.testName, run.runId, step, run.totalSteps, spec, List.of(), List.of())
+        );
+    }
+
+    private static void writeTestFixture(
+        Path sourceRoot, String testName, String runId, int step, int totalSteps, StepSpec spec
+    ) throws IOException {
+        JsonObject fixture = new JsonObject();
+        fixture.addProperty("kind", "test-fixture");
+        fixture.addProperty("testName", testName);
+        fixture.addProperty("runId", runId);
+        fixture.addProperty("step", step);
+        fixture.addProperty("totalSteps", totalSteps);
+        fixture.addProperty("message", spec.message());
+        writeJsonAtomically(sourceRoot.resolve("allcraft-test-fixture.json"), fixture);
+    }
+
+    private static TestRun runFromPrepared(Path worldRoot, AllcraftRevisionBuilder.PreparedRevision prepared, int totalSteps) throws IOException {
+        Patch patch = patchFromPrepared(prepared);
+        return new TestRun(
+            prepared.request().label(),
+            prepared.runId(),
+            prepared.serverId(),
+            prepared.worldId(),
+            new ArrayList<>(List.of(patch)),
+            worldRoot,
+            totalSteps,
+            prepared.client().cacheHit(),
+            prepared.server().cacheHit(),
+            prepared.client().compilationMillis() + prepared.server().compilationMillis()
+        );
+    }
+
+    private static Patch patchFromPrepared(AllcraftRevisionBuilder.PreparedRevision prepared) throws IOException {
+        int activationDelay = prepared.request().testFixture()
+            ? specs(prepared.request().label(), prepared.request().totalSteps()).get(prepared.request().step() - 1).activationDelayTicks()
+            : 20;
+        Patch patch = new Patch(
+            prepared.patchId(),
+            prepared.revision(),
+            prepared.request().step(),
+            new StepSpec(
+                prepared.request().display(), prepared.request().message(), prepared.request().fillerBytes(), activationDelay
+            ),
+            prepared.clientSha256(),
+            prepared.serverSha256(),
+            prepared.clientArtifact(),
+            prepared.serverArtifact(),
+            Stream.concat(prepared.changedFiles().stream(), prepared.deletedFiles().stream()).sorted().toList(),
+            prepared.client().classes().size(),
+            prepared.server().classes().size(),
+            prepared.client().resources().size(),
+            prepared.server().resources().size(),
+            prepared.client().deletedResources().size(),
+            prepared.server().deletedResources().size()
+        );
+        patch.serverArtifactPath = prepared.serverArtifactPath();
+        patch.preparedRevision = prepared;
+        patch.clientCacheHit = prepared.client().cacheHit();
+        patch.serverCacheHit = prepared.server().cacheHit();
+        patch.compilationMillis = prepared.client().compilationMillis() + prepared.server().compilationMillis();
+        try {
+            patch.serverTransaction = AllcraftRuntime.stage(prepared.serverArtifactPath(), prepared.serverSha256());
+            patch.serverResourcePreflight = AllcraftServerResources.preflight(prepared.serverArtifactPath());
+        } catch (Exception e) {
+            AllcraftRevisionBuilder.discard(prepared);
+            throw e instanceof IOException ioException ? ioException : new IOException("Server revision staging failed", e);
+        }
+        return patch;
     }
 
     private static List<StepSpec> specs(String testName, int patchCount) {
@@ -442,152 +566,6 @@ public final class AllcraftPatchServer {
         }
 
         return specs;
-    }
-
-    private static byte[] createArtifact(
-        String side,
-        String testName,
-        String runId,
-        String patchId,
-        long revision,
-        int step,
-        int totalSteps,
-        StepSpec spec,
-        Map<String, byte[]> classes,
-        Map<String, byte[]> resources,
-        List<String> deletedResources,
-        List<String> entrypoints,
-        List<String> changedFiles
-    ) throws IOException {
-        JsonObject descriptor = new JsonObject();
-        descriptor.addProperty("format", 1);
-        descriptor.addProperty("kind", artifactKind(testName));
-        descriptor.addProperty("side", side);
-        descriptor.addProperty("testName", testName);
-        descriptor.addProperty("runId", runId);
-        descriptor.addProperty("patchId", patchId);
-        descriptor.addProperty("revision", revision);
-        descriptor.addProperty("step", step);
-        descriptor.addProperty("totalSteps", totalSteps);
-        descriptor.addProperty("display", spec.display());
-        descriptor.addProperty("message", spec.message());
-        descriptor.addProperty("fillerBytes", spec.fillerBytes());
-        descriptor.addProperty("classCount", classes.size());
-        descriptor.addProperty("resourceCount", resources.size());
-        JsonArray entrypointArray = new JsonArray();
-        entrypoints.forEach(entrypointArray::add);
-        descriptor.add("entrypoints", entrypointArray);
-        JsonArray changedFileArray = new JsonArray();
-        changedFiles.forEach(changedFileArray::add);
-        descriptor.add("changedFiles", changedFileArray);
-        JsonArray deletedResourceArray = new JsonArray();
-        deletedResources.forEach(deletedResourceArray::add);
-        descriptor.add("deletedResources", deletedResourceArray);
-
-        byte[] json = (GSON.toJson(descriptor) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
-        int classBytes = classes.values().stream().mapToInt(bytes -> bytes.length).sum();
-        int resourceBytes = resources.values().stream().mapToInt(bytes -> bytes.length).sum();
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream(json.length + spec.fillerBytes() + classBytes + resourceBytes + 2048);
-        try (JarOutputStream jar = new JarOutputStream(bytes)) {
-            writeJarEntry(jar, "META-INF/allcraft-patch.json", json);
-            writeJarEntry(jar, "allcraft/test-patch.json", json);
-            if (!resources.isEmpty() || !deletedResources.isEmpty()) {
-                writeJarEntry(jar, "pack.mcmeta", createPackMetadata(testName, deletedResources));
-            }
-            for (Map.Entry<String, byte[]> entry : classes.entrySet()) {
-                writeJarEntry(jar, entry.getKey(), entry.getValue());
-            }
-            for (Map.Entry<String, byte[]> entry : resources.entrySet()) {
-                writeJarEntry(jar, entry.getKey(), entry.getValue());
-            }
-            if (spec.fillerBytes() > 0) {
-                byte[] filler = new byte[spec.fillerBytes()];
-                new Random(31L * revision + step).nextBytes(filler);
-                writeStoredJarEntry(jar, "allcraft/test-filler.bin", filler);
-            }
-        }
-
-        return bytes.toByteArray();
-    }
-
-    private static byte[] createPackMetadata(String testName, List<String> deletedResources) {
-        JsonObject root = new JsonObject();
-        JsonObject pack = new JsonObject();
-        pack.addProperty("description", "Allcraft live overlay: " + testName);
-        pack.addProperty("pack_format", 1);
-        root.add("pack", pack);
-        JsonObject filter = new JsonObject();
-        JsonArray blocked = new JsonArray();
-        for (String entry : deletedResources) {
-            int typeSeparator = entry.indexOf('/');
-            int namespaceSeparator = typeSeparator < 0 ? -1 : entry.indexOf('/', typeSeparator + 1);
-            if (namespaceSeparator < 0 || namespaceSeparator + 1 >= entry.length()) {
-                throw new IllegalArgumentException("Invalid deleted resource entry " + entry);
-            }
-            JsonObject pattern = new JsonObject();
-            pattern.addProperty("namespace", "^" + java.util.regex.Pattern.quote(entry.substring(typeSeparator + 1, namespaceSeparator)) + "$");
-            pattern.addProperty("path", "^" + java.util.regex.Pattern.quote(entry.substring(namespaceSeparator + 1)) + "$");
-            blocked.add(pattern);
-        }
-        filter.add("block", blocked);
-        root.add("filter", filter);
-        return (GSON.toJson(root) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
-    }
-
-    private static void writeJarEntry(JarOutputStream jar, String name, byte[] data) throws IOException {
-        JarEntry entry = new JarEntry(name);
-        jar.putNextEntry(entry);
-        jar.write(data);
-        jar.closeEntry();
-    }
-
-    private static void writeStoredJarEntry(JarOutputStream jar, String name, byte[] data) throws IOException {
-        CRC32 crc = new CRC32();
-        crc.update(data);
-        JarEntry entry = new JarEntry(name);
-        entry.setMethod(JarEntry.STORED);
-        entry.setSize(data.length);
-        entry.setCompressedSize(data.length);
-        entry.setCrc(crc.getValue());
-        jar.putNextEntry(entry);
-        jar.write(data);
-        jar.closeEntry();
-    }
-
-    private static void persistPreparedPatch(
-        Path patchesRoot, String serverId, String worldId, String testName, String runId, Patch patch
-    ) throws IOException {
-        String stem = String.format("%08d-%s", patch.revision, patch.patchId);
-        Path clientPath = patchesRoot.resolve("artifacts/client").resolve(stem + ".jar");
-        Path serverPath = patchesRoot.resolve("artifacts/server").resolve(stem + ".jar");
-        writeAtomically(clientPath, patch.clientArtifact);
-        writeAtomically(serverPath, patch.serverArtifact);
-        patch.serverArtifactPath = serverPath;
-
-        JsonObject sourceDescriptor = new JsonObject();
-        sourceDescriptor.addProperty("kind", artifactKind(testName));
-        sourceDescriptor.addProperty("serverId", serverId);
-        sourceDescriptor.addProperty("worldId", worldId);
-        sourceDescriptor.addProperty("testName", testName);
-        sourceDescriptor.addProperty("runId", runId);
-        sourceDescriptor.addProperty("patchId", patch.patchId);
-        sourceDescriptor.addProperty("revision", patch.revision);
-        sourceDescriptor.addProperty("step", patch.step);
-        sourceDescriptor.addProperty("clientSha256", patch.clientSha256);
-        sourceDescriptor.addProperty("serverSha256", patch.serverSha256);
-        sourceDescriptor.addProperty("clientSize", patch.clientArtifact.length);
-        sourceDescriptor.addProperty("serverSize", patch.serverArtifact.length);
-        sourceDescriptor.addProperty("clientClasses", patch.clientClassCount);
-        sourceDescriptor.addProperty("serverClasses", patch.serverClassCount);
-        sourceDescriptor.addProperty("clientResources", patch.clientResourceCount);
-        sourceDescriptor.addProperty("serverResources", patch.serverResourceCount);
-        sourceDescriptor.addProperty("deletedClientResources", patch.deletedClientResourceCount);
-        sourceDescriptor.addProperty("deletedServerResources", patch.deletedServerResourceCount);
-        JsonArray files = new JsonArray();
-        patch.changedFiles.forEach(files::add);
-        sourceDescriptor.add("changedFiles", files);
-        sourceDescriptor.addProperty("createdAt", Instant.now().toString());
-        writeJsonAtomically(patchesRoot.resolve("source").resolve(stem + ".json"), sourceDescriptor);
     }
 
     private static void stageCurrentPatch(MinecraftServer server, TestRun run) {
@@ -624,7 +602,7 @@ public final class AllcraftPatchServer {
                                 patch.revision,
                                 run.testName,
                                 patch.step,
-                                run.patches.size(),
+                                run.totalSteps,
                                 chunkIndex,
                                 chunkCount,
                                 patch.clientSha256,
@@ -637,6 +615,12 @@ public final class AllcraftPatchServer {
 
         run.phase = Phase.WAITING_FOR_READY;
         run.phaseStartedAt = server.getTickCount();
+        try {
+            writeTransactionState(run, patch, "staged", null);
+        } catch (IOException e) {
+            abortRun(server, run, conciseMessage(e));
+            return;
+        }
         announce(
             server,
             "[Allcraft] Streaming "
@@ -644,7 +628,7 @@ public final class AllcraftPatchServer {
                 + " patch "
                 + patch.step
                 + "/"
-                + run.patches.size()
+                + run.totalSteps
                 + ": "
                 + patch.clientArtifact.length
                 + " bytes in "
@@ -664,7 +648,7 @@ public final class AllcraftPatchServer {
                 patch.revision,
                 run.testName,
                 patch.step,
-                run.patches.size(),
+                run.totalSteps,
                 patch.activationTick,
                 patch.clientSha256
             )
@@ -677,6 +661,9 @@ public final class AllcraftPatchServer {
     }
 
     private static void commitRevision(TestRun run, Patch patch) throws IOException {
+        if (patch.preparedRevision != null) {
+            AllcraftRevisionBuilder.commit(patch.preparedRevision);
+        }
         Path manifestPath = run.patchesRoot.resolve("manifest.json");
         JsonObject manifest = readJson(manifestPath);
         manifest.addProperty("currentRevision", patch.revision);
@@ -684,7 +671,7 @@ public final class AllcraftPatchServer {
         JsonObject entry = new JsonObject();
         entry.addProperty("revision", patch.revision);
         entry.addProperty("patchId", patch.patchId);
-        entry.addProperty("kind", artifactKind(run.testName));
+        entry.addProperty("kind", "source-revision");
         entry.addProperty("testName", run.testName);
         entry.addProperty("runId", run.runId);
         entry.addProperty("step", patch.step);
@@ -701,7 +688,7 @@ public final class AllcraftPatchServer {
         result.addProperty("testName", run.testName);
         result.addProperty("runId", run.runId);
         result.addProperty("step", patch.step);
-        result.addProperty("totalSteps", run.patches.size());
+        result.addProperty("totalSteps", run.totalSteps);
         result.addProperty("revision", patch.revision);
         result.addProperty("patchId", patch.patchId);
         result.addProperty("clientSha256", patch.clientSha256);
@@ -726,7 +713,11 @@ public final class AllcraftPatchServer {
 
     private static void checkTimeout(MinecraftServer server, TestRun run, long tick, String status) {
         if (tick - run.phaseStartedAt > ACK_TIMEOUT_TICKS) {
-            failTest(server, run, "Timed out waiting for " + status + " acknowledgements");
+            if (run.phase == Phase.WAITING_FOR_ROLLBACK) {
+                failTest(server, run, "Timed out waiting for " + status + " acknowledgements");
+            } else {
+                abortRun(server, run, "Timed out waiting for " + status + " acknowledgements");
+            }
         }
     }
 
@@ -737,30 +728,82 @@ public final class AllcraftPatchServer {
             "[Allcraft] PASS "
                 + run.testName
                 + ": all "
-                + run.patches.size()
+                + run.totalSteps
                 + " patch(es) were compiled, cached, scheduled, activated, and acknowledged by every client",
             ChatFormatting.GREEN
         );
     }
 
+    private static void abortRun(MinecraftServer server, TestRun run, String reason) {
+        if (run.phase == Phase.WAITING_FOR_ROLLBACK) {
+            return;
+        }
+        Patch patch = run.current();
+        run.failureReason = reason;
+        try {
+            if (patch.serverTransaction != null && patch.serverTransaction.started()) {
+                patch.serverTransaction.rollback();
+            }
+        } catch (Exception e) {
+            LOGGER.error("Failed to roll back server classes for {}", patch.patchId, e);
+            run.failureReason += "; server class rollback failed: " + conciseMessage(e);
+        }
+        CompletableFuture<AllcraftServerResources.ApplyResult> inFlight = patch.serverResourceFuture;
+        patch.serverResourceFuture = inFlight == null
+            ? AllcraftServerResources.rollback(server, run.patchesRoot)
+            : inFlight.handle((unused, failure) -> null)
+                .thenCompose(unused -> AllcraftServerResources.rollback(server, run.patchesRoot));
+        broadcastControl(server, run, patch, AllcraftPayloads.ControlAction.ABORT);
+        run.phase = Phase.WAITING_FOR_ROLLBACK;
+        run.phaseStartedAt = server.getTickCount();
+        run.rollbackPlayers.clear();
+        try {
+            writeTransactionState(run, patch, "rolling-back", reason);
+        } catch (IOException e) {
+            LOGGER.error("Failed to record Allcraft rollback state", e);
+        }
+    }
+
     private static void failTest(MinecraftServer server, TestRun run, String reason) {
         if (ACTIVE_TESTS.remove(server) != null) {
+            Patch patch = run.current();
+            if (patch.preparedRevision != null) {
+                AllcraftRevisionBuilder.discard(patch.preparedRevision);
+            }
+            try {
+                clearTransactionState(run);
+            } catch (IOException e) {
+                LOGGER.warn("Failed to clear transaction journal", e);
+            }
             announce(server, "[Allcraft] FAIL " + run.testName + ": " + reason, ChatFormatting.RED);
         }
     }
 
-    private static void announce(MinecraftServer server, String message, ChatFormatting color) {
-        server.getPlayerList().broadcastSystemMessage(Component.literal(message).withStyle(color), false);
+    private static void writeTransactionState(TestRun run, Patch patch, String phase, String failure) throws IOException {
+        JsonObject state = new JsonObject();
+        state.addProperty("format", 1);
+        state.addProperty("phase", phase);
+        state.addProperty("serverId", run.serverId);
+        state.addProperty("worldId", run.worldId);
+        state.addProperty("patchId", patch.patchId);
+        state.addProperty("revision", patch.revision);
+        state.addProperty("parentRevision", patch.preparedRevision == null ? patch.revision - 1L : patch.preparedRevision.parentRevision());
+        state.addProperty("activationTick", patch.activationTick);
+        state.addProperty("serverSha256", patch.serverSha256);
+        state.addProperty("clientSha256", patch.clientSha256);
+        state.addProperty("updatedAt", Instant.now().toString());
+        if (failure != null) {
+            state.addProperty("failure", failure);
+        }
+        writeJsonAtomically(run.patchesRoot.resolve("transaction.json"), state);
     }
 
-    private static String artifactKind(String testName) {
-        if (AllcraftPatchCompiler.RESOURCE_TEST_NAMES.contains(testName)) {
-            return "runtime-resource";
-        }
-        if (AllcraftPatchCompiler.RUNTIME_TEST_NAMES.contains(testName)) {
-            return "runtime-code";
-        }
-        return "network-test";
+    private static void clearTransactionState(TestRun run) throws IOException {
+        Files.deleteIfExists(run.patchesRoot.resolve("transaction.json"));
+    }
+
+    private static void announce(MinecraftServer server, String message, ChatFormatting color) {
+        server.getPlayerList().broadcastSystemMessage(Component.literal(message).withStyle(color), false);
     }
 
     private static JsonObject readJson(Path path) throws IOException {
@@ -862,15 +905,17 @@ public final class AllcraftPatchServer {
         }
     }
 
-    private static String conciseMessage(Exception exception) {
-        String message = exception.getMessage();
-        return message == null ? exception.getClass().getSimpleName() : message.substring(0, Math.min(message.length(), 500));
+    private static String conciseMessage(Throwable throwable) {
+        String message = throwable.getMessage();
+        return message == null ? throwable.getClass().getSimpleName() : message.substring(0, Math.min(message.length(), 500));
     }
 
     private enum Phase {
         WAITING_FOR_READY,
         SCHEDULED,
         WAITING_FOR_APPLIED,
+        WAITING_FOR_COMMITTED,
+        WAITING_FOR_ROLLBACK,
         BETWEEN_PATCHES
     }
 
@@ -901,6 +946,12 @@ public final class AllcraftPatchServer {
         private AllcraftRuntime.ApplyResult serverApplyResult;
         private CompletableFuture<AllcraftServerResources.ApplyResult> serverResourceFuture;
         private AllcraftServerResources.ApplyResult serverResourceResult;
+        private AllcraftRevisionBuilder.PreparedRevision preparedRevision;
+        private AllcraftRuntime.Transaction serverTransaction;
+        private AllcraftServerResources.PreflightResult serverResourcePreflight;
+        private boolean clientCacheHit;
+        private boolean serverCacheHit;
+        private long compilationMillis;
 
         private Patch(
             String patchId,
@@ -943,17 +994,22 @@ public final class AllcraftPatchServer {
         private final String serverId;
         private final String worldId;
         private final List<Patch> patches;
+        private final Path worldRoot;
         private final Path patchesRoot;
-        private final boolean clientCacheHit;
-        private final boolean serverCacheHit;
-        private final long compilationMillis;
+        private final int totalSteps;
+        private boolean clientCacheHit;
+        private boolean serverCacheHit;
+        private long compilationMillis;
         private final Set<UUID> expectedPlayers = new HashSet<>();
         private final Set<UUID> readyPlayers = new HashSet<>();
         private final Set<UUID> appliedPlayers = new HashSet<>();
+        private final Set<UUID> committedPlayers = new HashSet<>();
+        private final Set<UUID> rollbackPlayers = new HashSet<>();
         private int patchIndex;
         private Phase phase = Phase.BETWEEN_PATCHES;
         private long phaseStartedAt;
-        private long nextStageTick;
+        private CompletableFuture<Patch> nextPatchFuture;
+        private String failureReason;
 
         private TestRun(
             String testName,
@@ -961,7 +1017,8 @@ public final class AllcraftPatchServer {
             String serverId,
             String worldId,
             List<Patch> patches,
-            Path patchesRoot,
+            Path worldRoot,
+            int totalSteps,
             boolean clientCacheHit,
             boolean serverCacheHit,
             long compilationMillis
@@ -971,7 +1028,9 @@ public final class AllcraftPatchServer {
             this.serverId = serverId;
             this.worldId = worldId;
             this.patches = patches;
-            this.patchesRoot = patchesRoot;
+            this.worldRoot = worldRoot;
+            this.patchesRoot = worldRoot.resolve("patches");
+            this.totalSteps = totalSteps;
             this.clientCacheHit = clientCacheHit;
             this.serverCacheHit = serverCacheHit;
             this.compilationMillis = compilationMillis;

@@ -30,6 +30,18 @@ public final class AllcraftCommand {
                                 )
                         )
                 )
+                .then(
+                    Commands.literal("apply")
+                        .executes(context -> AllcraftPatchServer.startApply(context.getSource(), "source"))
+                        .then(
+                            Commands.argument("label", StringArgumentType.word())
+                                .executes(
+                                    context -> AllcraftPatchServer.startApply(
+                                        context.getSource(), StringArgumentType.getString(context, "label")
+                                    )
+                                )
+                        )
+                )
         );
     }
 

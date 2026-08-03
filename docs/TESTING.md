@@ -6,7 +6,7 @@ Open a world, then run:
 /allcraft test <test-name>
 ```
 
-The networking tests stream, cache, schedule, activate, and acknowledge five distinct compiled patch JARs:
+The networking tests edit an ordinary world-source fixture and submit five sequential revisions through the production differ/artifact pipeline. They stream, cache, schedule, activate, and acknowledge five distinct compiled patch JARs:
 
 | Test | Checks |
 | --- | --- |
@@ -63,3 +63,9 @@ Durability/rollback sequence:
 Runtime compilation is queued in the background. Chat reports its duration and the client/server compiler-cache result. The test prints `PASS` only after the server and every connected client finish code/resource activation and acknowledgement.
 
 Runtime tests compile from and update the active world's `source/` tree. Server results are written under the world's `patches/test-results/`; client results are written under `patches/<serverId>/<worldId>/test-results/`. Result records include redefine, resource-reload, total runtime, loading-screen, and GC measurements.
+
+For the non-rendering production-pipeline/JVM regression, run:
+
+```bash
+tests/code-generality/run.sh
+```
