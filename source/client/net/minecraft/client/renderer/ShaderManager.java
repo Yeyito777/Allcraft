@@ -5,7 +5,6 @@ import com.google.common.collect.ImmutableMap.Builder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonSyntaxException;
-import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.preprocessor.GlslPreprocessor;
 import com.mojang.blaze3d.shaders.ShaderType;
@@ -16,16 +15,17 @@ import com.mojang.serialization.JsonOps;
 import it.unimi.dsi.fastutil.objects.ObjectArraySet;
 import java.io.IOException;
 import java.io.Reader;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.Comparator;
 import java.util.Map.Entry;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
 import net.minecraft.IdentifierException;
 import net.minecraft.client.renderer.texture.TextureManager;
 import net.minecraft.resources.FileToIdConverter;
@@ -80,6 +80,38 @@ public class ShaderManager extends SimplePreparableReloadListener<ShaderManager.
         }
 
         return new ShaderManager.Configs(shaderSources.build(), postChains.build());
+    }
+
+    /** Parses off-thread and transactionally publishes a fully validated GPU pipeline cache. */
+    public CompletableFuture<Void> allcraftReload(ResourceManager manager, Executor taskExecutor, Executor reloadExecutor) {
+        return CompletableFuture.supplyAsync(() -> this.prepare(manager, net.minecraft.util.profiling.InactiveProfiler.INSTANCE), taskExecutor)
+            .thenCompose(this::allcraftStageAcrossFrames);
+    }
+
+    private CompletableFuture<Void> allcraftStageAcrossFrames(ShaderManager.Configs configs) {
+        net.minecraft.client.Minecraft minecraft = net.minecraft.client.Minecraft.getInstance();
+        GpuDevice device = RenderSystem.getDevice();
+        ShaderManager.CompilationCache candidate = new ShaderManager.CompilationCache(configs);
+        List<RenderPipeline> pipelines = RenderPipelines.getStaticPipelines()
+            .stream()
+            .sorted(Comparator.comparing(pipeline -> pipeline.getLocation().toString()))
+            .toList();
+        CompletableFuture<Void> staged = minecraft.allcraftNextFrame(device::allcraftBeginPipelineCacheTransaction);
+        for (RenderPipeline pipeline : pipelines) {
+            staged = staged.thenCompose(unused -> minecraft.allcraftNextFrame(() -> {
+                if (!device.allcraftStagePipeline(pipeline, candidate::getShaderSource).isValid()) {
+                    throw new IllegalStateException("Failed to compile staged pipeline " + pipeline.getLocation());
+                }
+            }));
+        }
+        staged = staged.thenCompose(unused -> minecraft.allcraftNextFrame(() -> {
+            device.allcraftCommitPipelineCacheTransaction();
+            ShaderManager.CompilationCache previous = this.compilationCache;
+            this.compilationCache = candidate;
+            previous.close();
+        }));
+        return staged.exceptionallyCompose(failure -> minecraft.allcraftNextFrame(device::allcraftCancelPipelineCacheTransaction)
+            .thenCompose(unused -> CompletableFuture.failedFuture(failure)));
     }
 
     private static void loadShader(
@@ -147,22 +179,10 @@ public class ShaderManager extends SimplePreparableReloadListener<ShaderManager.
     protected void apply(ShaderManager.Configs preparations, ResourceManager manager, ProfilerFiller profiler) {
         ShaderManager.CompilationCache newCompilationCache = new ShaderManager.CompilationCache(preparations);
         Set<RenderPipeline> pipelinesToPreload = new HashSet<>(RenderPipelines.getStaticPipelines());
-        List<Identifier> failedLoads = new ArrayList<>();
         GpuDevice device = RenderSystem.getDevice();
-        device.clearPipelineCache();
-
-        for (RenderPipeline pipeline : pipelinesToPreload) {
-            CompiledRenderPipeline compiled = device.precompilePipeline(pipeline, newCompilationCache::getShaderSource);
-            if (!compiled.isValid()) {
-                failedLoads.add(pipeline.getLocation());
-            }
-        }
-
-        if (!failedLoads.isEmpty()) {
-            device.clearPipelineCache();
-            device.loadCriticalShaders();
+        if (!device.allcraftStagePipelineCache(pipelinesToPreload, newCompilationCache::getShaderSource)) {
             throw new RuntimeException(
-                "Failed to load required shader programs:\n" + failedLoads.stream().map(entry -> " - " + entry).collect(Collectors.joining("\n"))
+                "Failed to stage required shader programs; the previous pipeline cache remains active"
             );
         }
 

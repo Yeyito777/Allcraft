@@ -67,6 +67,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -154,6 +155,8 @@ import net.minecraft.client.resources.ClientPackSource;
 import net.minecraft.client.resources.DryFoliageColorReloadListener;
 import net.minecraft.client.resources.FoliageColorReloadListener;
 import net.minecraft.client.resources.GrassColorReloadListener;
+import net.minecraft.client.resources.SplashManager;
+import net.minecraft.client.resources.WaypointStyleManager;
 import net.minecraft.client.resources.MapTextureManager;
 import net.minecraft.client.resources.SkinManager;
 import net.minecraft.client.resources.language.I18n;
@@ -209,6 +212,7 @@ import net.minecraft.server.packs.repository.PackSource;
 import net.minecraft.server.packs.repository.RepositorySource;
 import net.minecraft.server.packs.resources.ReloadInstance;
 import net.minecraft.server.packs.resources.ReloadableResourceManager;
+import net.minecraft.server.packs.resources.PreparableReloadListener;
 import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.server.players.ProfileResolver;
 import net.minecraft.sounds.Music;
@@ -320,6 +324,7 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
     private final ReloadableResourceManager resourceManager;
     private List<Path> allcraftArtifactOverlays = List.of();
     private Set<Identifier> allcraftActiveResourceIds = Set.of();
+    private final ConcurrentLinkedQueue<Runnable> allcraftNextFrameTasks = new ConcurrentLinkedQueue<>();
     private final VanillaPackResources vanillaPackResources;
     private final DownloadedPackSource downloadedPackSource;
     private final PackRepository resourcePackRepository;
@@ -1032,14 +1037,35 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
         return this.reloadResourcePacks(false, null);
     }
 
+    /** Schedules exactly one bounded hot-reload operation for a future rendered frame. */
+    public CompletableFuture<Void> allcraftNextFrame(Runnable task) {
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        this.allcraftNextFrameTasks.add(() -> {
+            try {
+                task.run();
+                result.complete(null);
+            } catch (Throwable throwable) {
+                result.completeExceptionally(throwable);
+            }
+        });
+        return result;
+    }
+
     /** Installs an Allcraft overlay stack and updates only consumers affected by this revision. */
     public CompletableFuture<Void> allcraftReloadResources(
         List<Path> artifactOverlays, Set<Identifier> changedResources, Set<Identifier> deletedResources
     ) {
         long startedAt = System.nanoTime();
+        List<Path> previousOverlays = this.allcraftArtifactOverlays;
+        Set<Identifier> previousActiveResources = this.allcraftActiveResourceIds;
         List<Path> normalizedOverlays = artifactOverlays.stream().map(path -> path.toAbsolutePath().normalize()).toList();
-        boolean incrementalAppend = normalizedOverlays.size() >= this.allcraftArtifactOverlays.size()
-            && normalizedOverlays.subList(0, this.allcraftArtifactOverlays.size()).equals(this.allcraftArtifactOverlays);
+        boolean incrementalAppend = normalizedOverlays.size() >= this.allcraftArtifactOverlays.size();
+        for (int index = 0; incrementalAppend && index < this.allcraftArtifactOverlays.size(); index++) {
+            // Integrated restoration uses save-local artifact paths while streamed revisions use
+            // the client cache. Artifact filenames are content/revision identities; parent paths
+            // are transport details and must not turn an append into a full world replacement.
+            incrementalAppend = normalizedOverlays.get(index).getFileName().equals(this.allcraftArtifactOverlays.get(index).getFileName());
+        }
         Set<Identifier> touched = new HashSet<>(changedResources);
         touched.addAll(deletedResources);
         Set<Identifier> nextActiveResources = incrementalAppend ? new HashSet<>(this.allcraftActiveResourceIds) : new HashSet<>();
@@ -1058,19 +1084,56 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
         this.resourceManager.allcraftReplacePacks(packs);
 
         Set<Identifier> textures = new HashSet<>();
+        Set<Identifier> deletedTextures = new HashSet<>();
         Set<Identifier> soundFiles = new HashSet<>();
+        boolean atlasDefinitionsChanged = false;
+        boolean fontChanged = false;
+        boolean shadersChanged = false;
         boolean languageChanged = false;
         boolean soundDefinitionsChanged = false;
         boolean modelsChanged = false;
+        boolean particlesChanged = false;
+        boolean equipmentChanged = false;
+        boolean waypointStylesChanged = false;
+        boolean splashesChanged = false;
+        boolean cloudChanged = false;
+        boolean colorMapsChanged = false;
+        boolean gpuWarnlistChanged = false;
+        boolean regionalComplianciesChanged = false;
         boolean requiresFullReload = false;
         for (Identifier resource : touched) {
             String path = resource.getPath();
+            if (path.startsWith("font/") || path.startsWith("textures/font/")) {
+                fontChanged = true;
+            }
+            cloudChanged |= path.equals("textures/environment/clouds.png");
+            colorMapsChanged |= path.equals("textures/colormap/grass.png")
+                || path.equals("textures/colormap/foliage.png")
+                || path.equals("textures/colormap/dry_foliage.png");
             if (path.startsWith("textures/") && (path.endsWith(".png") || path.endsWith(".png.mcmeta"))) {
                 textures.add(
                     path.endsWith(".mcmeta")
                         ? Identifier.fromNamespaceAndPath(resource.getNamespace(), path.substring(0, path.length() - ".mcmeta".length()))
                         : resource
                 );
+            } else if (path.startsWith("atlases/") && path.endsWith(".json")) {
+                atlasDefinitionsChanged = true;
+            } else if (path.startsWith("font/")) {
+                // Font definitions and providers are staged by FontManager below.
+            } else if (path.startsWith("shaders/") || path.startsWith("post_effect/")) {
+                shadersChanged = true;
+            } else if (path.startsWith("particles/") && path.endsWith(".json")) {
+                particlesChanged = true;
+            } else if (path.startsWith("equipment/") && path.endsWith(".json")) {
+                equipmentChanged = true;
+            } else if (path.startsWith("waypoint_style/") && path.endsWith(".json")) {
+                waypointStylesChanged = true;
+            } else if (path.equals("texts/splashes.txt")) {
+                splashesChanged = true;
+            } else if (path.equals("gpu_warnlist.json")) {
+                gpuWarnlistChanged = true;
+            } else if (path.equals("regional_compliancies.json")) {
+                regionalComplianciesChanged = true;
             } else if (path.startsWith("lang/") && path.endsWith(".json")) {
                 languageChanged = true;
             } else if (path.startsWith("sounds/") && path.endsWith(".ogg")) {
@@ -1079,15 +1142,32 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
                 soundDefinitionsChanged = true;
             } else if (path.startsWith("models/") || path.startsWith("blockstates/") || path.startsWith("items/")) {
                 modelsChanged = true;
+            } else if (path.startsWith("texts/") || path.startsWith("resourcepacks/")) {
+                // These are read on demand; swapping the resource lookup stack is sufficient.
             } else {
                 requiresFullReload = true;
             }
         }
 
+        for (Identifier resource : deletedResources) {
+            String path = resource.getPath();
+            if (path.startsWith("textures/") && (path.endsWith(".png") || path.endsWith(".png.mcmeta"))) {
+                deletedTextures.add(
+                    path.endsWith(".mcmeta")
+                        ? Identifier.fromNamespaceAndPath(resource.getNamespace(), path.substring(0, path.length() - ".mcmeta".length()))
+                        : resource
+                );
+            }
+        }
+
         var background = ALLCRAFT_RESOURCE_EXECUTOR;
         LOGGER.info(
-            "Allcraft incremental resource plan: {} texture(s), {} sound file(s), language={}, sound definitions={}, models={}, fullFallback={}",
+            "Allcraft incremental resource plan: {} texture(s), {} deleted texture(s), atlas definitions={}, fonts={}, shaders={}, {} sound file(s), language={}, sound definitions={}, models={}, fullFallback={}",
             textures.size(),
+            deletedTextures.size(),
+            atlasDefinitionsChanged,
+            fontChanged,
+            shadersChanged,
             soundFiles.size(),
             languageChanged,
             soundDefinitionsChanged,
@@ -1095,38 +1175,147 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
             requiresFullReload
         );
         if (requiresFullReload) {
-            return this.allcraftFullResourceReload(background, startedAt, "unclassified resource dependency");
+            return this.allcraftGuardResourceActivation(
+                this.allcraftFullResourceReload(background, startedAt, "unclassified resource dependency"),
+                previousOverlays,
+                previousActiveResources
+            );
         }
 
+        boolean finalFontChanged = fontChanged;
+        boolean finalShadersChanged = shadersChanged;
         boolean finalLanguageChanged = languageChanged;
         boolean finalSoundDefinitionsChanged = soundDefinitionsChanged;
         boolean finalModelsChanged = modelsChanged;
-        return this.atlasManager.allcraftReloadExistingSprites(this.resourceManager, textures, background, this).thenCompose(atlasResult -> {
-            if (atlasResult.requiresRestitch()) {
-                return this.allcraftFullResourceReload(background, startedAt, "atlas layout changed");
+        boolean finalParticlesChanged = particlesChanged;
+        boolean finalEquipmentChanged = equipmentChanged;
+        boolean finalWaypointStylesChanged = waypointStylesChanged;
+        boolean finalSplashesChanged = splashesChanged;
+        boolean finalCloudChanged = cloudChanged;
+        boolean finalColorMapsChanged = colorMapsChanged;
+        boolean finalGpuWarnlistChanged = gpuWarnlistChanged;
+        boolean finalRegionalComplianciesChanged = regionalComplianciesChanged;
+        CompletableFuture<Void> activation = this.atlasManager
+            .allcraftReloadSprites(this.resourceManager, textures, deletedTextures, atlasDefinitionsChanged, background, this)
+            .thenCompose(atlasResult -> {
+            if (atlasResult.requiresFullAtlas()) {
+                return this.allcraftFullResourceReload(background, startedAt, "stable atlas reserve exhausted");
             }
             List<CompletableFuture<?>> updates = new ArrayList<>();
             updates.add(this.textureManager.allcraftReloadTextures(this.resourceManager, textures, background, this));
             // Rebinding on every pack swap prevents cached Resource objects from retaining closed overlay JARs.
             updates.add(this.soundManager.allcraftReload(this.resourceManager, soundFiles, finalSoundDefinitionsChanged, background, this));
+            if (finalFontChanged) {
+                updates.add(this.fontManager.allcraftReload(this.resourceManager, background, this));
+            }
+            if (finalShadersChanged) {
+                updates.add(this.shaderManager.allcraftReload(this.resourceManager, background, this));
+            }
             if (finalLanguageChanged) {
                 updates.add(this.languageManager.allcraftReload(this.resourceManager, background, this));
             }
-            if (finalModelsChanged) {
+            if (finalModelsChanged || atlasResult.modelRebakeRequired()) {
                 ReloadInstance modelReload = this.resourceManager.allcraftCreateReload(
                     background,
                     this,
                     RESOURCE_RELOAD_INITIAL_TASK,
                     List.of(this.atlasManager.allcraftSnapshotProvider(), this.modelManager)
                 );
-                updates.add(modelReload.done().thenRunAsync(this.levelExtractor::allcraftScheduleSeamlessSectionRebuilds, this));
+                updates.add(modelReload.done().thenComposeAsync(unused -> {
+                    CompletableFuture<Void> visibleActivation = this.levelExtractor.allcraftScheduleSeamlessSectionRebuilds();
+                    this.levelExtractor
+                        .allcraftModelRetirement()
+                        .thenRunAsync(this.atlasManager::allcraftReleaseRetiredAllocations, this);
+                    return visibleActivation;
+                }, this));
             }
-            return CompletableFuture.allOf(updates.toArray(CompletableFuture[]::new)).thenRunAsync(() -> LOGGER.info(
-                "Allcraft incremental resources applied in {} ms ({} in-place atlas sprite(s)); no global atlas upload, audio restart, or chunk reset",
-                (System.nanoTime() - startedAt) / 1_000_000L,
-                atlasResult.updatedSprites()
-            ), this);
+            List<Class<?>> listenerTypes = new ArrayList<>();
+            if (finalParticlesChanged) {
+                listenerTypes.add(ParticleResources.class);
+            }
+            if (finalEquipmentChanged) {
+                listenerTypes.add(EquipmentAssetManager.class);
+            }
+            if (finalWaypointStylesChanged) {
+                listenerTypes.add(WaypointStyleManager.class);
+            }
+            if (finalSplashesChanged) {
+                listenerTypes.add(SplashManager.class);
+            }
+            if (finalCloudChanged) {
+                listenerTypes.add(net.minecraft.client.renderer.CloudRenderer.class);
+            }
+            if (finalColorMapsChanged) {
+                listenerTypes.add(GrassColorReloadListener.class);
+                listenerTypes.add(FoliageColorReloadListener.class);
+                listenerTypes.add(DryFoliageColorReloadListener.class);
+            }
+            if (finalGpuWarnlistChanged) {
+                listenerTypes.add(GpuWarnlistManager.class);
+            }
+            if (finalRegionalComplianciesChanged) {
+                listenerTypes.add(PeriodicNotificationManager.class);
+            }
+            if (!listenerTypes.isEmpty()) {
+                List<PreparableReloadListener> listeners = new ArrayList<>();
+                if (finalParticlesChanged) {
+                    listeners.add(this.atlasManager.allcraftSnapshotProvider());
+                }
+                listeners.addAll(this.resourceManager.allcraftListeners(listenerTypes.toArray(Class<?>[]::new)));
+                updates.add(this.resourceManager.allcraftCreateReload(background, this, RESOURCE_RELOAD_INITIAL_TASK, listeners).done());
+            }
+            boolean finalModelTransaction = finalModelsChanged || atlasResult.modelRebakeRequired();
+            return CompletableFuture.allOf(updates.toArray(CompletableFuture[]::new))
+                .thenCompose(unused -> this.allcraftNextFrame(() -> {
+                    this.atlasManager.allcraftReleaseRetiredContents();
+                    if (!finalModelTransaction) {
+                        this.atlasManager.allcraftReleaseRetiredAllocations();
+                    }
+                }))
+                .thenRunAsync(() -> LOGGER.info(
+                    "Allcraft incremental resources applied in {} ms ({} atlas replacement(s), {} deletion(s), structural={}, animation={}); no global atlas upload or chunk reset",
+                    (System.nanoTime() - startedAt) / 1_000_000L,
+                    atlasResult.updatedSprites(),
+                    atlasResult.deletedSprites(),
+                    atlasResult.structural(),
+                    atlasResult.animationChanged()
+                ), this);
         });
+        return this.allcraftGuardResourceActivation(activation, previousOverlays, previousActiveResources);
+    }
+
+    private CompletableFuture<Void> allcraftGuardResourceActivation(
+        CompletableFuture<Void> activation, List<Path> previousOverlays, Set<Identifier> previousActiveResources
+    ) {
+        CompletableFuture<Void> guarded = new CompletableFuture<>();
+        activation.whenComplete((unused, failure) -> {
+            if (failure == null) {
+                guarded.complete(null);
+                return;
+            }
+            this.execute(() -> {
+                try {
+                    this.allcraftArtifactOverlays = previousOverlays;
+                    this.allcraftActiveResourceIds = previousActiveResources;
+                    List<PackResources> packs = new ArrayList<>(this.resourcePackRepository.openAllSelected());
+                    this.allcraftAppendOverlayPacks(packs);
+                    this.resourceManager.allcraftReplacePacks(packs);
+                    ReloadInstance rollback = this.resourceManager.allcraftCreateFullReload(
+                        ALLCRAFT_RESOURCE_EXECUTOR, this, RESOURCE_RELOAD_INITIAL_TASK
+                    );
+                    rollback.done().whenComplete((rollbackUnused, rollbackFailure) -> {
+                        if (rollbackFailure != null) {
+                            failure.addSuppressed(rollbackFailure);
+                        }
+                        guarded.completeExceptionally(failure);
+                    });
+                } catch (Throwable rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                    guarded.completeExceptionally(failure);
+                }
+            });
+        });
+        return guarded;
     }
 
     private void allcraftAppendOverlayPacks(List<PackResources> packs) {
@@ -1297,6 +1486,11 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
             CompletableFuture<Void> future = this.pendingReload;
             this.pendingReload = null;
             this.reloadResourcePacks().thenRun(() -> future.complete(null));
+        }
+
+        Runnable allcraftFrameTask = this.allcraftNextFrameTasks.poll();
+        if (allcraftFrameTask != null) {
+            allcraftFrameTask.run();
         }
 
         this.playerSocialManager.getPresenceHandler().tick();

@@ -13,6 +13,7 @@ import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.jtracy.TracyClient;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Collection;
 import java.util.OptionalDouble;
 import java.util.function.Supplier;
 import net.minecraft.util.Mth;
@@ -167,6 +168,26 @@ public class GpuDevice {
 
     public CompiledRenderPipeline precompilePipeline(RenderPipeline pipeline, @Nullable ShaderSource shaderSource) {
         return this.backend.precompilePipeline(pipeline, shaderSource);
+    }
+
+    public boolean allcraftStagePipelineCache(Collection<RenderPipeline> pipelines, ShaderSource shaderSource) {
+        return this.backend.allcraftStagePipelineCache(pipelines, shaderSource);
+    }
+
+    public void allcraftBeginPipelineCacheTransaction() {
+        this.backend.allcraftBeginPipelineCacheTransaction();
+    }
+
+    public CompiledRenderPipeline allcraftStagePipeline(RenderPipeline pipeline, ShaderSource shaderSource) {
+        return this.backend.allcraftStagePipeline(pipeline, shaderSource);
+    }
+
+    public void allcraftCommitPipelineCacheTransaction() {
+        this.backend.allcraftCommitPipelineCacheTransaction();
+    }
+
+    public void allcraftCancelPipelineCacheTransaction() {
+        this.backend.allcraftCancelPipelineCacheTransaction();
     }
 
     public void clearPipelineCache() {

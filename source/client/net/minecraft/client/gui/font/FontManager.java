@@ -69,6 +69,7 @@ public class FontManager implements AutoCloseable, PreparableReloadListener {
     private final AtlasManager atlasManager;
     private final Map<Identifier, AtlasGlyphProvider> atlasProviders = new HashMap<>();
     private final PlayerGlyphProvider playerProvider;
+    private long allcraftFontGeneration;
 
     public FontManager(TextureManager textureManager, AtlasManager atlasManager, PlayerSkinRenderCache playerSkinRenderCache) {
         this.textureManager = textureManager;
@@ -78,7 +79,13 @@ public class FontManager implements AutoCloseable, PreparableReloadListener {
     }
 
     private FontSet createFontSet(Identifier id, List<GlyphProvider.Conditional> providers, Set<FontOption> options) {
-        GlyphStitcher stitcher = new GlyphStitcher(this.textureManager, id);
+        return this.createFontSet(id, id, providers, options);
+    }
+
+    private FontSet createFontSet(
+        Identifier id, Identifier texturePrefix, List<GlyphProvider.Conditional> providers, Set<FontOption> options
+    ) {
+        GlyphStitcher stitcher = new GlyphStitcher(this.textureManager, texturePrefix);
         FontSet result = new FontSet(stitcher);
         result.reload(providers, options);
         return result;
@@ -98,6 +105,11 @@ public class FontManager implements AutoCloseable, PreparableReloadListener {
         return this.prepare(currentReload.resourceManager(), taskExecutor)
             .thenCompose(preparationBarrier::wait)
             .thenAcceptAsync(preparations -> this.apply(preparations, Profiler.get()), reloadExecutor);
+    }
+
+    /** Stages all font providers off-thread and publishes a validated font-set map atomically. */
+    public CompletableFuture<Void> allcraftReload(ResourceManager manager, Executor taskExecutor, Executor reloadExecutor) {
+        return this.prepare(manager, taskExecutor).thenAcceptAsync(preparations -> this.apply(preparations, Profiler.get()), reloadExecutor);
     }
 
     private CompletableFuture<FontManager.Preparation> prepare(ResourceManager manager, Executor executor) {
@@ -202,27 +214,48 @@ public class FontManager implements AutoCloseable, PreparableReloadListener {
     }
 
     private void apply(FontManager.Preparation preparations, ProfilerFiller profiler) {
-        profiler.push("closing");
-        this.anyGlyphs.invalidate();
-        this.nonFishyGlyphs.invalidate();
-        this.fontSets.values().forEach(FontSet::close);
-        this.fontSets.clear();
-        this.providersToClose.forEach(GlyphProvider::close);
-        this.providersToClose.clear();
+        profiler.push("staging");
         Set<FontOption> fontOptions = getFontOptions(Minecraft.getInstance().options);
-        profiler.popPush("reloading");
-        preparations.fontSets()
-            .forEach(
-                (id, newProviders) -> this.fontSets.put(id, this.createFontSet(id, Lists.reverse((List<GlyphProvider.Conditional>)newProviders), fontOptions))
-            );
-        this.providersToClose.addAll(preparations.allProviders);
-        profiler.pop();
-        if (!this.fontSets.containsKey(Minecraft.DEFAULT_FONT)) {
+        Map<Identifier, FontSet> stagedSets = new HashMap<>();
+        long generation = ++this.allcraftFontGeneration;
+        try {
+            preparations.fontSets()
+                .forEach(
+                    (id, newProviders) -> stagedSets.put(
+                        id,
+                        this.createFontSet(
+                            id,
+                            id.withSuffix("/allcraft-" + generation),
+                            Lists.reverse((List<GlyphProvider.Conditional>)newProviders),
+                            fontOptions
+                        )
+                    )
+                );
+        } catch (RuntimeException e) {
+            stagedSets.values().forEach(FontSet::close);
+            preparations.allProviders.forEach(GlyphProvider::close);
+            throw e;
+        }
+        if (!stagedSets.containsKey(Minecraft.DEFAULT_FONT)) {
+            stagedSets.values().forEach(FontSet::close);
+            preparations.allProviders.forEach(GlyphProvider::close);
             throw new IllegalStateException("Default font failed to load");
         }
 
+        profiler.popPush("publishing");
+        List<FontSet> oldSets = List.copyOf(this.fontSets.values());
+        List<GlyphProvider> oldProviders = List.copyOf(this.providersToClose);
+        this.fontSets.clear();
+        this.fontSets.putAll(stagedSets);
+        this.providersToClose.clear();
+        this.providersToClose.addAll(preparations.allProviders);
+        this.anyGlyphs.invalidate();
+        this.nonFishyGlyphs.invalidate();
         this.atlasProviders.clear();
         this.atlasManager.forEach((atlasId, atlasTexture) -> this.atlasProviders.put(atlasId, new AtlasGlyphProvider(atlasTexture)));
+        oldSets.forEach(FontSet::close);
+        oldProviders.forEach(GlyphProvider::close);
+        profiler.pop();
     }
 
     public void updateOptions(Options options) {

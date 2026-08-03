@@ -150,7 +150,7 @@ public final class AllcraftServerResources {
     private static Map<String, byte[]> readResources(Path artifact, String prefix) throws IOException {
         Map<String, byte[]> resources = new LinkedHashMap<>();
         try (JarFile jar = new JarFile(artifact.toFile(), false)) {
-            for (JarEntry entry : jar.stream().filter(value -> !value.isDirectory() && value.getName().startsWith(prefix)).sorted().toList()) {
+            for (JarEntry entry : jar.stream().filter(value -> !value.isDirectory() && value.getName().startsWith(prefix)).sorted(java.util.Comparator.comparing(JarEntry::getName)).toList()) {
                 try (InputStream input = jar.getInputStream(entry)) {
                     resources.put(entry.getName(), input.readAllBytes());
                 }

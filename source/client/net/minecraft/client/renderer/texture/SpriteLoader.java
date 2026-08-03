@@ -102,8 +102,14 @@ public class SpriteLoader {
                 throw new ReportedException(report);
             }
 
-            int width = stitcher.getWidth();
-            int height = stitcher.getHeight();
+            int usedWidth = stitcher.getWidth();
+            int usedHeight = stitcher.getHeight();
+            // Allcraft keeps a fixed normalized-UV address space with spare room. Incremental
+            // sprites can then be appended without resizing the GPU texture or invalidating UVs
+            // already baked into chunk meshes. If this reserve is exhausted, the caller stages a
+            // conventional full stitch and model transaction rather than silently moving UVs.
+            int width = reserveDimension(usedWidth, maxTextureSize);
+            int height = reserveDimension(usedHeight, maxTextureSize);
             Map<Identifier, TextureAtlasSprite> result = this.getStitchedSprites(stitcher, width, height);
             TextureAtlasSprite missingSprite = result.get(MissingTextureAtlasSprite.getLocation());
             CompletableFuture<Void> readyForUpload = CompletableFuture.runAsync(
@@ -111,6 +117,13 @@ public class SpriteLoader {
             );
             return new SpriteLoader.Preparations(width, height, mipLevel, missingSprite, result, readyForUpload);
         }
+    }
+
+    private static int reserveDimension(int used, int maximum) {
+        if (System.getProperty("allcraft.gameDir") == null || used >= maximum) {
+            return used;
+        }
+        return Math.min(maximum, used << 1);
     }
 
     private static CompletableFuture<List<SpriteContents>> runSpriteSuppliers(

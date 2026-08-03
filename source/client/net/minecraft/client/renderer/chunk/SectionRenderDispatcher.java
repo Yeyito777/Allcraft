@@ -10,9 +10,11 @@ import com.mojang.blaze3d.vertex.TlsfAllocator;
 import com.mojang.blaze3d.vertex.UberGpuBuffer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexSorting;
+import com.mojang.logging.LogUtils;
 import java.nio.ByteBuffer;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Objects;
 import java.util.Map.Entry;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -38,9 +40,12 @@ import net.minecraft.world.phys.Vec3;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.api.distmarker.OnlyIn;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
 
 @OnlyIn(Dist.CLIENT)
 public class SectionRenderDispatcher {
+    private static final Logger LOGGER = LogUtils.getLogger();
+    private static final long ALLCRAFT_ATOMIC_STAGING_DEADLINE_MS = 45_000L;
     public static final int NEARBY_SECTION_DISTANCE_IN_BLOCKS = 32;
     private final SectionTaskDynamicQueue queue = new SectionTaskDynamicQueue();
     private final SectionBufferBuilderPack fixedBuffers;
@@ -51,6 +56,9 @@ public class SectionRenderDispatcher {
     private final AtomicReference<Vec3> cameraPosition = new AtomicReference<>(Vec3.ZERO);
     private volatile SectionCompiler sectionCompiler;
     private volatile long allcraftModelGeneration;
+    private volatile long allcraftStagingModelGeneration;
+    private volatile long allcraftAtomicStartedAt;
+    private final Map<SectionRenderDispatcher.RenderSection, Long> allcraftAtomicTargets = new ConcurrentHashMap<>();
     private final StagingBuffer stagingBuffer;
     private final Map<ChunkSectionLayer, SectionRenderDispatcher.SectionUberBuffers> chunkUberBuffers;
     private final ReentrantLock copyLock = new ReentrantLock();
@@ -90,6 +98,92 @@ public class SectionRenderDispatcher {
 
     public long allcraftModelGeneration() {
         return this.allcraftModelGeneration;
+    }
+
+    public void allcraftBeginAtomicModelGeneration(long generation, Iterable<SectionRenderDispatcher.RenderSection> targets) {
+        this.allcraftCancelAtomicModelGeneration();
+        this.allcraftStagingModelGeneration = generation;
+        this.allcraftAtomicStartedAt = Util.getMillis();
+        for (SectionRenderDispatcher.RenderSection target : targets) {
+            this.allcraftAtomicTargets.put(target, target.getSectionNode());
+        }
+        LOGGER.info("Staging {} visible chunk-section meshes for Allcraft model generation {}", this.allcraftAtomicTargets.size(), generation);
+    }
+
+    public void allcraftAddAtomicModelTarget(SectionRenderDispatcher.RenderSection target, long generation) {
+        if (this.allcraftStagingModelGeneration == generation) {
+            this.allcraftAtomicTargets.putIfAbsent(target, target.getSectionNode());
+        }
+    }
+
+    public boolean allcraftTryCommitAtomicModelGeneration(long generation) {
+        if (this.allcraftStagingModelGeneration != generation) {
+            return false;
+        }
+        this.allcraftAtomicTargets.entrySet().removeIf(entry -> entry.getKey().getSectionNode() != entry.getValue());
+        if (this.allcraftAtomicTargets.isEmpty()) {
+            this.allcraftStagingModelGeneration = 0L;
+            return true;
+        }
+        boolean allReady = this.allcraftAtomicTargets.keySet().stream().allMatch(section -> section.allcraftHasStagedGeneration(generation));
+        if (!allReady) {
+            if (Util.getMillis() - this.allcraftAtomicStartedAt < ALLCRAFT_ATOMIC_STAGING_DEADLINE_MS) {
+                return false;
+            }
+            int originalSize = this.allcraftAtomicTargets.size();
+            this.allcraftAtomicTargets.keySet().removeIf(section -> !section.allcraftHasStagedGeneration(generation));
+            LOGGER.warn(
+                "Allcraft model generation {} reached its atomic staging deadline; committing {}/{} ready visible sections and degrading the rest to progressive replacement",
+                generation,
+                this.allcraftAtomicTargets.size(),
+                originalSize
+            );
+            if (this.allcraftAtomicTargets.isEmpty()) {
+                this.allcraftStagingModelGeneration = 0L;
+                return true;
+            }
+        }
+        this.copyLock.lock();
+        try {
+            for (SectionRenderDispatcher.RenderSection section : this.allcraftAtomicTargets.keySet()) {
+                section.allcraftCommitStagedGeneration(generation);
+            }
+            LOGGER.info("Atomically committed {} chunk-section meshes for Allcraft model generation {}", this.allcraftAtomicTargets.size(), generation);
+            this.allcraftAtomicTargets.clear();
+            this.allcraftStagingModelGeneration = 0L;
+            return true;
+        } finally {
+            this.copyLock.unlock();
+        }
+    }
+
+    private boolean allcraftStageMesh(RenderSection section, CompiledSectionMesh mesh) {
+        Long node = this.allcraftAtomicTargets.get(section);
+        if (this.allcraftStagingModelGeneration != mesh.allcraftModelGeneration() || node == null || node != section.getSectionNode()) {
+            return false;
+        }
+        this.copyLock.lock();
+        try {
+            section.allcraftSetStagedMesh(mesh);
+        } finally {
+            this.copyLock.unlock();
+        }
+        return true;
+    }
+
+    private void allcraftCancelAtomicModelGeneration() {
+        if (this.allcraftAtomicTargets.isEmpty()) {
+            this.allcraftStagingModelGeneration = 0L;
+            return;
+        }
+        this.copyLock.lock();
+        try {
+            this.allcraftAtomicTargets.keySet().forEach(RenderSection::allcraftDiscardStagedMesh);
+            this.allcraftAtomicTargets.clear();
+            this.allcraftStagingModelGeneration = 0L;
+        } finally {
+            this.copyLock.unlock();
+        }
     }
 
     private void runTask() {
@@ -222,6 +316,7 @@ public class SectionRenderDispatcher {
         private long uploadedTime;
         private long fadeDuration;
         private boolean wasPreviouslyEmpty;
+        private volatile @Nullable CompiledSectionMesh allcraftStagedMesh;
 
         public RenderSection(int index, long sectionNode) {
             this.index = index;
@@ -266,6 +361,12 @@ public class SectionRenderDispatcher {
 
         public void reset() {
             this.cancelTasks();
+            SectionRenderDispatcher.this.copyLock.lock();
+            try {
+                this.allcraftDiscardStagedMesh();
+            } finally {
+                SectionRenderDispatcher.this.copyLock.unlock();
+            }
             SectionMesh mesh = this.sectionMesh.getAndSet(CompiledSectionMesh.UNCOMPILED);
             SectionRenderDispatcher.this.copyLock.lock();
 
@@ -344,6 +445,11 @@ public class SectionRenderDispatcher {
             return task == null || task.modelGeneration < generation || task.isCancelled.get();
         }
 
+        public boolean allcraftHasCommittedModelGeneration(long generation) {
+            SectionMesh mesh = this.sectionMesh.get();
+            return !(mesh instanceof CompiledSectionMesh compiled) || compiled.allcraftModelGeneration() >= generation;
+        }
+
         public boolean allcraftRequestModelGeneration(long generation) {
             return this.allcraftNeedsModelGeneration(generation);
         }
@@ -366,6 +472,34 @@ public class SectionRenderDispatcher {
             }
 
             return oldMesh;
+        }
+
+        private void allcraftSetStagedMesh(CompiledSectionMesh mesh) {
+            if (this.allcraftStagedMesh != null && this.allcraftStagedMesh != mesh) {
+                this.releaseSectionMesh(this.allcraftStagedMesh);
+            }
+            this.allcraftStagedMesh = mesh;
+        }
+
+        public boolean allcraftHasStagedGeneration(long generation) {
+            return this.allcraftStagedMesh != null && this.allcraftStagedMesh.allcraftModelGeneration() == generation;
+        }
+
+        private void allcraftCommitStagedGeneration(long generation) {
+            if (!this.allcraftHasStagedGeneration(generation)) {
+                return;
+            }
+            CompiledSectionMesh staged = this.allcraftStagedMesh;
+            this.allcraftStagedMesh = null;
+            SectionMesh old = this.setSectionMesh(staged);
+            this.releaseSectionMesh(old);
+        }
+
+        private void allcraftDiscardStagedMesh() {
+            if (this.allcraftStagedMesh != null) {
+                this.releaseSectionMesh(this.allcraftStagedMesh);
+                this.allcraftStagedMesh = null;
+            }
         }
 
         private void releaseSectionMesh(SectionMesh oldMesh) {
@@ -395,8 +529,10 @@ public class SectionRenderDispatcher {
             }
 
             if (allBuffersUpdated && this.sectionMesh.get() != compiledSectionMesh) {
-                SectionMesh oldMesh = this.setSectionMesh(compiledSectionMesh);
-                this.releaseSectionMesh(oldMesh);
+                if (!SectionRenderDispatcher.this.allcraftStageMesh(this, compiledSectionMesh)) {
+                    SectionMesh oldMesh = this.setSectionMesh(compiledSectionMesh);
+                    this.releaseSectionMesh(oldMesh);
+                }
             }
         }
 
@@ -482,13 +618,14 @@ public class SectionRenderDispatcher {
                 CompiledSectionMesh compiledSectionMesh = new CompiledSectionMesh(translucencyPointOfView, results);
                 compiledSectionMesh.allcraftSetModelGeneration(this.modelGeneration);
                 if (results.renderedLayers.isEmpty()) {
-                    SectionMesh oldMesh = RenderSection.this.setSectionMesh(compiledSectionMesh);
-                    SectionRenderDispatcher.this.copyLock.lock();
-
-                    try {
-                        RenderSection.this.releaseSectionMesh(oldMesh);
-                    } finally {
-                        SectionRenderDispatcher.this.copyLock.unlock();
+                    if (!SectionRenderDispatcher.this.allcraftStageMesh(RenderSection.this, compiledSectionMesh)) {
+                        SectionMesh oldMesh = RenderSection.this.setSectionMesh(compiledSectionMesh);
+                        SectionRenderDispatcher.this.copyLock.lock();
+                        try {
+                            RenderSection.this.releaseSectionMesh(oldMesh);
+                        } finally {
+                            SectionRenderDispatcher.this.copyLock.unlock();
+                        }
                     }
 
                     return SectionRenderDispatcher.RenderSection.SectionTask.SectionTaskResult.SUCCESSFUL;

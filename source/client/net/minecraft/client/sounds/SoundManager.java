@@ -167,6 +167,7 @@ public class SoundManager extends SimplePreparableReloadListener<SoundManager.Pr
                 preparations.apply(this.registry, this.soundCache, this.soundEngine);
                 this.soundEngine.allcraftInvalidateBuffers(changedSoundFiles);
                 this.soundEngine.allcraftFlushPreloads();
+                this.soundEngine.allcraftRestartAffected(changedSoundFiles, true);
                 return changedSoundFiles.size();
             }, reloadExecutor);
         }
@@ -174,6 +175,7 @@ public class SoundManager extends SimplePreparableReloadListener<SoundManager.Pr
             this.soundCache.clear();
             this.soundCache.putAll(resources);
             this.soundEngine.allcraftInvalidateBuffers(changedSoundFiles);
+            this.soundEngine.allcraftRestartAffected(changedSoundFiles, false);
             return changedSoundFiles.size();
         }, reloadExecutor);
     }

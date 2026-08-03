@@ -1,6 +1,8 @@
 package net.minecraft.allcraft;
 
 import com.mojang.logging.LogUtils;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -24,13 +26,16 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
+import javax.imageio.ImageIO;
 import org.slf4j.Logger;
 
 /** Server-side compiler for real source-changing Allcraft test patches. */
 public final class AllcraftPatchCompiler {
     public static final List<String> RUNTIME_TEST_NAMES = List.of("double-jump", "no-world-gen", "flying-boats", "new-class");
     public static final List<String> RESOURCE_TEST_NAMES = List.of(
-        "live-texture", "live-model", "live-sound", "live-language", "live-recipe", "live-resource-delete"
+        "live-texture", "live-model", "live-sound", "live-language", "live-recipe", "live-resource-delete",
+        "asset-new-sprite", "asset-resized-sprite", "asset-animated-sprite", "asset-atlas-delete", "asset-font",
+        "asset-shader", "asset-particle", "asset-gui", "asset-live-sound", "asset-mass-model", "asset-atlas-manifest"
     );
     public static final List<String> PATCH_TEST_NAMES = Stream.concat(RUNTIME_TEST_NAMES.stream(), RESOURCE_TEST_NAMES.stream()).toList();
     private static final String CACHE_FORMAT = "allcraft-javac-cache-v2";
@@ -317,19 +322,155 @@ public final class AllcraftPatchCompiler {
                     resourceEditGenerated(sourceRoot, "server/data/allcraft/recipe/dirt_to_diamond.json", recipe)
                 );
             }
+            case "asset-new-sprite" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/allcraft/textures/block/live_block.png",
+                    checkerTexture(16, 16, 0xFFFF7F00, 0xFF00FFFF)
+                ),
+                resourceEditGenerated(
+                    sourceRoot, "client/assets/minecraft/models/block/dirt.json", cubeAllModel("allcraft:block/live_block")
+                )
+            );
+            case "asset-resized-sprite" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/minecraft/textures/block/dirt.png",
+                    checkerTexture(32, 32, 0xFF30D050, 0xFF102070)
+                )
+            );
+            case "asset-animated-sprite" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot, "client/assets/minecraft/textures/block/dirt.png", animatedCheckerTexture()
+                ),
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/minecraft/textures/block/dirt.png.mcmeta",
+                    "{\n  \"animation\": {\n    \"frametime\": 4,\n    \"interpolate\": false\n  }\n}\n".getBytes(StandardCharsets.UTF_8)
+                )
+            );
+            case "asset-font" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/allcraft/font/live.json",
+                    Files.readAllBytes(sourceRoot.resolve("client/assets/minecraft/font/default.json"))
+                )
+            );
+            case "asset-shader" -> List.of(
+                resourceEditExisting(sourceRoot, "client/assets/minecraft/shaders/include/fog.glsl", bytes -> {
+                    String shader = new String(bytes, StandardCharsets.UTF_8);
+                    return ("// ALLCRAFT LIVE SHADER REVISION\n" + shader).getBytes(StandardCharsets.UTF_8);
+                })
+            );
+            case "asset-particle" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/allcraft/textures/particle/live.png",
+                    checkerTexture(16, 16, 0xFFFF00FF, 0xFFFFFF00)
+                ),
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/minecraft/particles/flame.json",
+                    "{\n  \"textures\": [\n    \"allcraft:live\"\n  ]\n}\n".getBytes(StandardCharsets.UTF_8)
+                )
+            );
+            case "asset-gui" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/minecraft/textures/gui/sprites/hud/crosshair.png",
+                    checkerTexture(15, 15, 0xFFFF2020, 0xFFFFFFFF)
+                )
+            );
+            case "asset-live-sound" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/minecraft/sounds/records/cat.ogg",
+                    Files.readAllBytes(sourceRoot.resolve("client/assets/minecraft/sounds/event/mob_effects/bad_omen.ogg"))
+                )
+            );
+            case "asset-mass-model" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot, "client/assets/minecraft/models/block/stone.json", cubeAllModel("minecraft:block/emerald_block")
+                )
+            );
+            case "asset-atlas-manifest" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/allcraft/textures/manifest_sprite.png",
+                    checkerTexture(16, 16, 0xFF40A0FF, 0xFFFFA040)
+                ),
+                resourceEditExisting(sourceRoot, "client/assets/minecraft/atlases/blocks.json", bytes -> {
+                    String atlas = new String(bytes, StandardCharsets.UTF_8);
+                    String ending = "\n  ]\n}";
+                    String source = ",\n    {\n      \"type\": \"minecraft:single\",\n      \"resource\": \"allcraft:manifest_sprite\"\n    }";
+                    if (!atlas.contains("allcraft:manifest_sprite")) {
+                        atlas = atlas.replace(ending, source + ending);
+                    }
+                    return atlas.getBytes(StandardCharsets.UTF_8);
+                }),
+                resourceEditGenerated(
+                    sourceRoot, "client/assets/minecraft/models/block/dirt.json", cubeAllModel("allcraft:manifest_sprite")
+                )
+            );
             default -> List.of();
         };
     }
 
     private static List<ResourceDeletion> resourceDeletions(Path sourceRoot, String testName) throws IOException {
-        if (!testName.equals("live-resource-delete")) {
+        Path path = switch (testName) {
+            case "live-resource-delete" -> sourceRoot.resolve("client/assets/minecraft/textures/misc/forcefield.png");
+            case "asset-atlas-delete" -> sourceRoot.resolve("client/assets/minecraft/textures/block/dirt.png");
+            default -> null;
+        };
+        if (path == null) {
             return List.of();
         }
-        Path path = sourceRoot.resolve("client/assets/minecraft/textures/misc/forcefield.png");
         if (!Files.isRegularFile(path)) {
             throw new IOException("Patch resource file is missing: " + path);
         }
         return List.of(new ResourceDeletion(path, Files.readAllBytes(path)));
+    }
+
+    private static byte[] cubeAllModel(String texture) {
+        return ("{\n"
+                + "  \"parent\": \"minecraft:block/cube_all\",\n"
+                + "  \"textures\": {\n"
+                + "    \"all\": \""
+                + texture
+                + "\"\n"
+                + "  }\n"
+                + "}\n")
+            .getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static byte[] checkerTexture(int width, int height, int first, int second) throws IOException {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                image.setRGB(x, y, ((x / 4) + (y / 4) & 1) == 0 ? first : second);
+            }
+        }
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        if (!ImageIO.write(image, "png", output)) {
+            throw new IOException("PNG encoder is unavailable");
+        }
+        return output.toByteArray();
+    }
+
+    private static byte[] animatedCheckerTexture() throws IOException {
+        BufferedImage image = new BufferedImage(16, 32, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < 32; y++) {
+            for (int x = 0; x < 16; x++) {
+                boolean alternate = ((x / 4) + ((y % 16) / 4) & 1) != 0;
+                int color = y < 16 ? (alternate ? 0xFF101010 : 0xFFFF00FF) : (alternate ? 0xFF0030FF : 0xFFFFFF00);
+                image.setRGB(x, y, color);
+            }
+        }
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        if (!ImageIO.write(image, "png", output)) {
+            throw new IOException("PNG encoder is unavailable");
+        }
+        return output.toByteArray();
     }
 
     private static ResourceEdit resourceEditExisting(Path sourceRoot, String relative, UnaryOperator<byte[]> transform) throws IOException {
@@ -503,6 +644,17 @@ public final class AllcraftPatchCompiler {
             case "live-language" -> "Dirt should now be named 'Allcraft Live Dirt' in inventories";
             case "live-recipe" -> "Craft one dirt by itself to receive one diamond";
             case "live-resource-delete" -> "The forcefield texture should be absent from the active resource manager";
+            case "asset-new-sprite" -> "Dirt should use the newly added orange-and-cyan allcraft:live_block atlas sprite";
+            case "asset-resized-sprite" -> "The dirt sprite should change from 16x16 to a green-and-blue 32x32 sprite without atlas restitch";
+            case "asset-animated-sprite" -> "Dirt should animate between magenta/black and yellow/blue frames";
+            case "asset-atlas-delete" -> "Dirt should use the missing sprite while old meshes remain valid until atomic model activation";
+            case "asset-font" -> "The new allcraft:live font definition should be available immediately";
+            case "asset-shader" -> "The fog include should be transactionally recompiled with rendering uninterrupted";
+            case "asset-particle" -> "Spawn minecraft:flame particles; they should use the new allcraft:live sprite";
+            case "asset-gui" -> "The HUD crosshair should become a red-and-white checker";
+            case "asset-live-sound" -> "A currently playing records/cat sound should restart using the replacement audio";
+            case "asset-mass-model" -> "All visible stone should switch atomically to the emerald-block model";
+            case "asset-atlas-manifest" -> "A sprite introduced by an atlases/blocks.json single source should render on dirt";
             default -> testName;
         };
     }

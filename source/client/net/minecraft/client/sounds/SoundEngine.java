@@ -114,6 +114,38 @@ public class SoundEngine {
         }
     }
 
+    /** Restarts only active sources whose resolved bytes or event definitions changed. */
+    public int allcraftRestartAffected(Set<Identifier> changedSoundPaths, boolean definitionsChanged) {
+        if (!this.loaded) {
+            return 0;
+        }
+        List<SoundInstance> affected = this.instanceToChannel.keySet().stream().filter(instance -> {
+            Sound resolved = instance.getSound();
+            return definitionsChanged || resolved != null && changedSoundPaths.contains(resolved.getPath());
+        }).toList();
+        int restarted = 0;
+        for (SoundInstance instance : affected) {
+            ChannelAccess.ChannelHandle oldHandle = this.instanceToChannel.remove(instance);
+            if (oldHandle == null) {
+                continue;
+            }
+            this.instanceBySource.remove(instance.getSource(), instance);
+            this.soundDeleteTime.remove(instance);
+            if (instance instanceof TickableSoundInstance tickable) {
+                this.tickingSounds.remove(tickable);
+            }
+            oldHandle.execute(Channel::stop);
+            this.channelAccess.allcraftRelease(oldHandle);
+            if (this.play(instance) != SoundEngine.PlayResult.NOT_STARTED) {
+                restarted++;
+            }
+        }
+        if (restarted > 0) {
+            LOGGER.info(MARKER, "Restarted {} active sound source(s) for an Allcraft resource revision", restarted);
+        }
+        return restarted;
+    }
+
     private synchronized void loadLibrary() {
         if (!this.loaded) {
             try {

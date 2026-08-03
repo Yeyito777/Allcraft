@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.SortedSet;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import net.minecraft.SharedConstants;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -93,6 +94,8 @@ public class LevelExtractor implements ResourceManagerReloadListener {
     private final ArrayDeque<Long> allcraftPendingSectionRebuilds = new ArrayDeque<>();
     private final Set<Long> allcraftPendingSectionNodes = new HashSet<>();
     private long allcraftTargetModelGeneration;
+    private CompletableFuture<Void> allcraftModelActivation = CompletableFuture.completedFuture(null);
+    private CompletableFuture<Void> allcraftModelRetirement = CompletableFuture.completedFuture(null);
 
     public LevelExtractor(Minecraft minecraft, LevelRenderState levelRenderState, LevelRenderer levelRenderer) {
         this.minecraft = minecraft;
@@ -110,6 +113,13 @@ public class LevelExtractor implements ResourceManagerReloadListener {
             this.sectionUpdateTracker.repositionCamera(SectionPos.of(cameraPos));
             this.allcraftQueueStaleVisibleSections();
             this.allcraftProcessSectionRebuilds();
+            SectionRenderDispatcher dispatcher = this.levelRenderer.sectionRenderDispatcher();
+            if (dispatcher != null) {
+                if (dispatcher.allcraftTryCommitAtomicModelGeneration(this.allcraftTargetModelGeneration)) {
+                    this.allcraftModelActivation.complete(null);
+                }
+                this.allcraftCompleteModelRetirementIfReady(dispatcher);
+            }
         }
 
         if (this.shouldResetLevelRenderData) {
@@ -409,6 +419,8 @@ public class LevelExtractor implements ResourceManagerReloadListener {
         } else {
             this.levelRenderer.entityRenderDispatcher().resetCamera();
             this.sectionUpdateTracker = null;
+            this.allcraftModelActivation.complete(null);
+            this.allcraftModelRetirement.complete(null);
         }
 
         this.shouldResetLevelRenderData = true;
@@ -434,7 +446,15 @@ public class LevelExtractor implements ResourceManagerReloadListener {
      * Keeps old meshes visible while replacements compile asynchronously. A small bounded batch
      * is admitted per frame, and admission pauses while the vanilla compile queue is busy.
      */
-    public void allcraftScheduleSeamlessSectionRebuilds() {
+    public CompletableFuture<Void> allcraftScheduleSeamlessSectionRebuilds() {
+        if (!this.allcraftModelActivation.isDone()) {
+            this.allcraftModelActivation.complete(null);
+        }
+        if (!this.allcraftModelRetirement.isDone()) {
+            this.allcraftModelRetirement.completeExceptionally(new IllegalStateException("Superseded by a newer model generation"));
+        }
+        this.allcraftModelActivation = new CompletableFuture<>();
+        this.allcraftModelRetirement = new CompletableFuture<>();
         this.allcraftPendingSectionRebuilds.clear();
         this.allcraftPendingSectionNodes.clear();
         // SectionCompiler intentionally snapshots the model sets. Refresh that snapshot before
@@ -445,7 +465,17 @@ public class LevelExtractor implements ResourceManagerReloadListener {
         );
         ViewArea viewArea = this.levelRenderer.viewArea();
         if (this.level == null || this.sectionUpdateTracker == null || viewArea == null) {
-            return;
+            this.allcraftModelActivation.complete(null);
+            this.allcraftModelRetirement.complete(null);
+            return this.allcraftModelActivation;
+        }
+        SectionRenderDispatcher dispatcher = this.levelRenderer.sectionRenderDispatcher();
+        List<SectionRenderDispatcher.RenderSection> visibleTargets = this.levelRenderer.visibleSections()
+            .stream()
+            .filter(section -> section.getSectionMesh() instanceof CompiledSectionMesh)
+            .toList();
+        if (dispatcher != null) {
+            dispatcher.allcraftBeginAtomicModelGeneration(this.allcraftTargetModelGeneration, visibleTargets);
         }
         SectionPos camera = SectionPos.of(this.minecraft.gameRenderer.mainCamera().position());
         List<Long> sections = new ArrayList<>();
@@ -465,6 +495,49 @@ public class LevelExtractor implements ResourceManagerReloadListener {
                 this.allcraftPendingSectionRebuilds.addLast(section);
             }
         }
+        if (dispatcher != null && dispatcher.allcraftTryCommitAtomicModelGeneration(this.allcraftTargetModelGeneration)) {
+            this.allcraftModelActivation.complete(null);
+        }
+        this.allcraftCompleteModelRetirementIfReady(dispatcher);
+        return this.allcraftModelActivation;
+    }
+
+    public CompletableFuture<Void> allcraftModelRetirement() {
+        return this.allcraftModelRetirement;
+    }
+
+    private void allcraftCompleteModelRetirementIfReady(@Nullable SectionRenderDispatcher dispatcher) {
+        if (this.allcraftModelRetirement.isDone() || this.allcraftTargetModelGeneration == 0L || dispatcher == null) {
+            return;
+        }
+        ViewArea viewArea = this.levelRenderer.viewArea();
+        if (viewArea == null) {
+            this.allcraftModelRetirement.complete(null);
+            return;
+        }
+        if (this.allcraftPendingSectionRebuilds.isEmpty()) {
+            for (SectionRenderDispatcher.RenderSection section : viewArea.allcraftSections()) {
+                if (section.getSectionMesh() != CompiledSectionMesh.UNCOMPILED
+                    && section.allcraftNeedsModelGeneration(this.allcraftTargetModelGeneration)
+                    && this.allcraftPendingSectionNodes.add(section.getSectionNode())) {
+                    this.allcraftPendingSectionRebuilds.addLast(section.getSectionNode());
+                }
+            }
+        }
+        if (!this.allcraftPendingSectionRebuilds.isEmpty()) {
+            return;
+        }
+        boolean allCommitted = true;
+        for (SectionRenderDispatcher.RenderSection section : viewArea.allcraftSections()) {
+            if (section.getSectionMesh() != CompiledSectionMesh.UNCOMPILED
+                && !section.allcraftHasCommittedModelGeneration(this.allcraftTargetModelGeneration)) {
+                allCommitted = false;
+                break;
+            }
+        }
+        if (allCommitted) {
+            this.allcraftModelRetirement.complete(null);
+        }
     }
 
     private void allcraftQueueStaleVisibleSections() {
@@ -474,27 +547,35 @@ public class LevelExtractor implements ResourceManagerReloadListener {
         for (SectionRenderDispatcher.RenderSection section : this.levelRenderer.visibleSections()) {
             long node = section.getSectionNode();
             if (section.allcraftNeedsModelGeneration(this.allcraftTargetModelGeneration) && this.allcraftPendingSectionNodes.add(node)) {
+                SectionRenderDispatcher dispatcher = this.levelRenderer.sectionRenderDispatcher();
+                if (dispatcher != null) {
+                    dispatcher.allcraftAddAtomicModelTarget(section, this.allcraftTargetModelGeneration);
+                }
                 this.allcraftPendingSectionRebuilds.addFirst(node);
             }
         }
     }
 
     private void allcraftProcessSectionRebuilds() {
-        if (this.allcraftPendingSectionRebuilds.isEmpty() || this.sectionUpdateTracker == null) {
+        if (this.allcraftPendingSectionRebuilds.isEmpty() || this.sectionUpdateTracker == null || this.level == null) {
             return;
         }
         SectionRenderDispatcher dispatcher = this.levelRenderer.sectionRenderDispatcher();
-        if (dispatcher != null && dispatcher.getCompileQueueSize() >= 8) {
+        if (dispatcher == null || dispatcher.getCompileQueueSize() >= 32) {
             return;
         }
         ViewArea viewArea = this.levelRenderer.viewArea();
+        RenderRegionCache cache = new RenderRegionCache();
         int admitted = 0;
-        while (admitted < 8 && !this.allcraftPendingSectionRebuilds.isEmpty()) {
+        while (admitted < 16 && dispatcher.getCompileQueueSize() < 32 && !this.allcraftPendingSectionRebuilds.isEmpty()) {
             long section = this.allcraftPendingSectionRebuilds.removeFirst();
             this.allcraftPendingSectionNodes.remove(section);
             SectionRenderDispatcher.RenderSection renderSection = viewArea == null ? null : viewArea.allcraftGetRenderSection(section);
             if (renderSection != null && renderSection.allcraftRequestModelGeneration(this.allcraftTargetModelGeneration)) {
-                this.sectionUpdateTracker.setDirty(SectionPos.x(section), SectionPos.y(section), SectionPos.z(section), false);
+                // Submit directly instead of waiting for the ordinary dirty-section extractor.
+                // The bounded dispatcher queue keeps CPU work off the render thread while letting
+                // the full atomic cohort make progress even when vanilla chunk updates are busy.
+                renderSection.compileAsync(cache.createRegion(this.level, section));
                 admitted++;
             }
         }

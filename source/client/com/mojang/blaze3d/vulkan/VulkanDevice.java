@@ -51,8 +51,10 @@ import org.slf4j.Logger;
 public class VulkanDevice implements GpuDeviceBackend {
     private static final Logger LOGGER = LogUtils.getLogger();
     private final ShaderSource defaultShaderSource;
-    private final Map<RenderPipeline, VulkanRenderPipeline> pipelineCache = new IdentityHashMap<>();
-    private final Map<VulkanDevice.ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new HashMap<>();
+    private Map<RenderPipeline, VulkanRenderPipeline> pipelineCache = new IdentityHashMap<>();
+    private Map<VulkanDevice.ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new HashMap<>();
+    private @Nullable Map<RenderPipeline, VulkanRenderPipeline> allcraftCandidatePipelines;
+    private @Nullable Map<VulkanDevice.ShaderCompilationKey, IntermediaryShaderModule> allcraftCandidateShaders;
     private final VulkanInstance instance;
     private final VkDevice vkDevice;
     private final long vma;
@@ -242,6 +244,79 @@ public class VulkanDevice implements GpuDeviceBackend {
     public CompiledRenderPipeline precompilePipeline(RenderPipeline pipeline, @Nullable ShaderSource customShaderSource) {
         ShaderSource shaderSource = customShaderSource == null ? this.defaultShaderSource : customShaderSource;
         return this.pipelineCache.computeIfAbsent(pipeline, ignored -> this.compilePipeline(pipeline, shaderSource));
+    }
+
+    @Override
+    public boolean allcraftStagePipelineCache(java.util.Collection<RenderPipeline> pipelines, ShaderSource shaderSource) {
+        this.allcraftBeginPipelineCacheTransaction();
+        try {
+            for (RenderPipeline pipeline : pipelines) {
+                if (!this.allcraftStagePipeline(pipeline, shaderSource).isValid()) {
+                    this.allcraftCancelPipelineCacheTransaction();
+                    return false;
+                }
+            }
+            this.allcraftCommitPipelineCacheTransaction();
+            return true;
+        } catch (RuntimeException | Error e) {
+            this.allcraftCancelPipelineCacheTransaction();
+            throw e;
+        }
+    }
+
+    @Override
+    public void allcraftBeginPipelineCacheTransaction() {
+        this.allcraftCancelPipelineCacheTransaction();
+        this.allcraftCandidatePipelines = new IdentityHashMap<>();
+        this.allcraftCandidateShaders = new HashMap<>();
+    }
+
+    @Override
+    public CompiledRenderPipeline allcraftStagePipeline(RenderPipeline pipeline, ShaderSource shaderSource) {
+        if (this.allcraftCandidatePipelines == null || this.allcraftCandidateShaders == null) {
+            throw new IllegalStateException("No Allcraft pipeline transaction is active");
+        }
+        Map<RenderPipeline, VulkanRenderPipeline> activePipelines = this.pipelineCache;
+        Map<VulkanDevice.ShaderCompilationKey, IntermediaryShaderModule> activeShaders = this.shaderCache;
+        this.pipelineCache = this.allcraftCandidatePipelines;
+        this.shaderCache = this.allcraftCandidateShaders;
+        try {
+            return this.precompilePipeline(pipeline, shaderSource);
+        } finally {
+            this.allcraftCandidatePipelines = this.pipelineCache;
+            this.allcraftCandidateShaders = this.shaderCache;
+            this.pipelineCache = activePipelines;
+            this.shaderCache = activeShaders;
+        }
+    }
+
+    @Override
+    public void allcraftCommitPipelineCacheTransaction() {
+        if (this.allcraftCandidatePipelines == null || this.allcraftCandidateShaders == null) {
+            throw new IllegalStateException("No Allcraft pipeline transaction is active");
+        }
+        this.graphicsQueue.waitIdle();
+        this.allcraftDestroyPipelineMaps(this.pipelineCache, this.shaderCache);
+        this.pipelineCache = this.allcraftCandidatePipelines;
+        this.shaderCache = this.allcraftCandidateShaders;
+        this.allcraftCandidatePipelines = null;
+        this.allcraftCandidateShaders = null;
+    }
+
+    @Override
+    public void allcraftCancelPipelineCacheTransaction() {
+        if (this.allcraftCandidatePipelines != null && this.allcraftCandidateShaders != null) {
+            this.allcraftDestroyPipelineMaps(this.allcraftCandidatePipelines, this.allcraftCandidateShaders);
+        }
+        this.allcraftCandidatePipelines = null;
+        this.allcraftCandidateShaders = null;
+    }
+
+    private void allcraftDestroyPipelineMaps(
+        Map<RenderPipeline, VulkanRenderPipeline> pipelines, Map<VulkanDevice.ShaderCompilationKey, IntermediaryShaderModule> shaders
+    ) {
+        pipelines.values().forEach(VulkanRenderPipeline::destroy);
+        shaders.values().forEach(IntermediaryShaderModule::close);
     }
 
     protected VulkanRenderPipeline getOrCompilePipeline(RenderPipeline pipeline) {

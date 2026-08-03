@@ -3,6 +3,7 @@ package com.mojang.blaze3d.opengl;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.GpuOutOfMemoryException;
 import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.preprocessor.GlslPreprocessor;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
@@ -62,8 +63,10 @@ class GlDevice implements GpuDeviceBackend {
     private final GlDebugLabel debugLabels;
     private final DirectStateAccess directStateAccess;
     private final ShaderSource defaultShaderSource;
-    private final Map<RenderPipeline, GlRenderPipeline> pipelineCache = new IdentityHashMap<>();
-    private final Map<GlDevice.ShaderCompilationKey, GlShaderModule> shaderCache = new HashMap<>();
+    private Map<RenderPipeline, GlRenderPipeline> pipelineCache = new IdentityHashMap<>();
+    private Map<GlDevice.ShaderCompilationKey, GlShaderModule> shaderCache = new HashMap<>();
+    private @Nullable Map<RenderPipeline, GlRenderPipeline> allcraftCandidatePipelines;
+    private @Nullable Map<GlDevice.ShaderCompilationKey, GlShaderModule> allcraftCandidateShaders;
     private final FrameBufferCache frameBufferCache = new FrameBufferCache();
     private final VertexArrayCache vertexArrayCache;
     private final BufferStorage bufferStorage;
@@ -310,6 +313,86 @@ class GlDevice implements GpuDeviceBackend {
     public GlRenderPipeline precompilePipeline(RenderPipeline pipeline, @Nullable ShaderSource customShaderSource) {
         ShaderSource shaderSource = customShaderSource == null ? this.defaultShaderSource : customShaderSource;
         return this.pipelineCache.computeIfAbsent(pipeline, p -> this.compilePipeline(p, shaderSource));
+    }
+
+    @Override
+    public boolean allcraftStagePipelineCache(java.util.Collection<RenderPipeline> pipelines, ShaderSource shaderSource) {
+        this.allcraftBeginPipelineCacheTransaction();
+        try {
+            for (RenderPipeline pipeline : pipelines) {
+                if (!this.allcraftStagePipeline(pipeline, shaderSource).isValid()) {
+                    this.allcraftCancelPipelineCacheTransaction();
+                    return false;
+                }
+            }
+            this.allcraftCommitPipelineCacheTransaction();
+            return true;
+        } catch (RuntimeException | Error e) {
+            this.allcraftCancelPipelineCacheTransaction();
+            throw e;
+        }
+    }
+
+    @Override
+    public void allcraftBeginPipelineCacheTransaction() {
+        this.allcraftCancelPipelineCacheTransaction();
+        this.allcraftCandidatePipelines = new IdentityHashMap<>();
+        this.allcraftCandidateShaders = new HashMap<>();
+    }
+
+    @Override
+    public CompiledRenderPipeline allcraftStagePipeline(RenderPipeline pipeline, ShaderSource shaderSource) {
+        if (this.allcraftCandidatePipelines == null || this.allcraftCandidateShaders == null) {
+            throw new IllegalStateException("No Allcraft pipeline transaction is active");
+        }
+        Map<RenderPipeline, GlRenderPipeline> activePipelines = this.pipelineCache;
+        Map<GlDevice.ShaderCompilationKey, GlShaderModule> activeShaders = this.shaderCache;
+        this.pipelineCache = this.allcraftCandidatePipelines;
+        this.shaderCache = this.allcraftCandidateShaders;
+        try {
+            return this.precompilePipeline(pipeline, shaderSource);
+        } finally {
+            this.allcraftCandidatePipelines = this.pipelineCache;
+            this.allcraftCandidateShaders = this.shaderCache;
+            this.pipelineCache = activePipelines;
+            this.shaderCache = activeShaders;
+        }
+    }
+
+    @Override
+    public void allcraftCommitPipelineCacheTransaction() {
+        if (this.allcraftCandidatePipelines == null || this.allcraftCandidateShaders == null) {
+            throw new IllegalStateException("No Allcraft pipeline transaction is active");
+        }
+        this.allcraftDestroyPipelineMaps(this.pipelineCache, this.shaderCache);
+        this.pipelineCache = this.allcraftCandidatePipelines;
+        this.shaderCache = this.allcraftCandidateShaders;
+        this.allcraftCandidatePipelines = null;
+        this.allcraftCandidateShaders = null;
+    }
+
+    @Override
+    public void allcraftCancelPipelineCacheTransaction() {
+        if (this.allcraftCandidatePipelines != null && this.allcraftCandidateShaders != null) {
+            this.allcraftDestroyPipelineMaps(this.allcraftCandidatePipelines, this.allcraftCandidateShaders);
+        }
+        this.allcraftCandidatePipelines = null;
+        this.allcraftCandidateShaders = null;
+    }
+
+    private void allcraftDestroyPipelineMaps(
+        Map<RenderPipeline, GlRenderPipeline> pipelines, Map<GlDevice.ShaderCompilationKey, GlShaderModule> shaders
+    ) {
+        for (GlRenderPipeline pipeline : pipelines.values()) {
+            if (pipeline.program() != GlProgram.INVALID_PROGRAM) {
+                pipeline.program().close();
+            }
+        }
+        for (GlShaderModule shader : shaders.values()) {
+            if (shader != GlShaderModule.INVALID_SHADER) {
+                shader.close();
+            }
+        }
     }
 
     private GlShaderModule compileShader(GlDevice.ShaderCompilationKey key, ShaderSource shaderSource) {

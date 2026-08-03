@@ -85,61 +85,198 @@ public class AtlasManager implements AutoCloseable, PreparableReloadListener, Sp
         this.maxMipmapLevels = maxMipmapLevels;
     }
 
-    /**
-     * Reloads same-sized, static sprites directly into their existing GPU atlas rectangles.
-     * Existing baked models and chunk meshes keep valid UVs, so no chunk rebuild is needed.
-     */
-    public CompletableFuture<AtlasManager.HotReloadResult> allcraftReloadExistingSprites(
-        ResourceManager resourceManager, Set<Identifier> changedTextureResources, Executor taskExecutor, Executor reloadExecutor
+    /** Resolves and atomically applies changed, new, deleted, resized, and animated sprites. */
+    public CompletableFuture<AtlasManager.HotReloadResult> allcraftReloadSprites(
+        ResourceManager resourceManager,
+        Set<Identifier> changedTextureResources,
+        Set<Identifier> deletedTextureResources,
+        boolean atlasDefinitionsChanged,
+        Executor taskExecutor,
+        Executor reloadExecutor
     ) {
+        Set<Identifier> targetSprites = new java.util.HashSet<>();
+        for (Identifier resource : changedTextureResources) {
+            Identifier sprite = allcraftTextureResourceToSprite(resource);
+            if (sprite != null) {
+                targetSprites.add(sprite);
+            }
+        }
+        for (Identifier resource : deletedTextureResources) {
+            Identifier sprite = allcraftTextureResourceToSprite(resource);
+            if (sprite != null) {
+                targetSprites.add(sprite);
+            }
+        }
+        if (targetSprites.isEmpty() && !atlasDefinitionsChanged) {
+            return CompletableFuture.completedFuture(AtlasManager.HotReloadResult.EMPTY);
+        }
+
+        Set<Identifier> knownSprites = this.spriteLookup.keySet().stream().map(SpriteId::texture).collect(java.util.stream.Collectors.toSet());
+        boolean needsResolutionSnapshot = atlasDefinitionsChanged || !knownSprites.containsAll(targetSprites);
+        if (needsResolutionSnapshot) {
+            return this.allcraftResolveAndApply(resourceManager, targetSprites, taskExecutor, reloadExecutor);
+        }
+
         List<CompletableFuture<AtlasManager.PendingHotSprite>> loads = new ArrayList<>();
         this.spriteLookup.forEach((spriteId, existing) -> {
-            Identifier resourceId = Identifier.fromNamespaceAndPath(
-                spriteId.texture().getNamespace(), "textures/" + spriteId.texture().getPath() + ".png"
-            );
-            if (!changedTextureResources.contains(resourceId)) {
+            if (!targetSprites.contains(spriteId.texture())) {
                 return;
             }
             AtlasManager.AtlasEntry atlasEntry = this.atlasByTexture.get(spriteId.atlasLocation());
             if (atlasEntry == null) {
                 return;
             }
+            Identifier resourceId = allcraftSpriteToTextureResource(spriteId.texture());
             loads.add(CompletableFuture.supplyAsync(() -> {
                 Resource resource = resourceManager.getResource(resourceId).orElse(null);
                 if (resource == null) {
-                    return new AtlasManager.PendingHotSprite(atlasEntry, existing, null);
+                    return new AtlasManager.PendingHotSprite(atlasEntry, spriteId.texture(), existing, null);
                 }
                 try {
                     SpriteContents contents = SpriteResourceLoader.create(atlasEntry.config.additionalMetadata).loadSprite(spriteId.texture(), resource);
                     if (contents != null) {
                         contents.increaseMipLevel(atlasEntry.atlas.maxMipLevel());
                     }
-                    return new AtlasManager.PendingHotSprite(atlasEntry, existing, contents);
+                    return new AtlasManager.PendingHotSprite(atlasEntry, spriteId.texture(), existing, contents);
                 } catch (RuntimeException e) {
                     throw new CompletionException(e);
                 }
             }, taskExecutor));
         });
-        if (loads.isEmpty()) {
-            return CompletableFuture.completedFuture(new AtlasManager.HotReloadResult(0, false));
-        }
         return CompletableFuture.allOf(loads.toArray(CompletableFuture[]::new)).thenApplyAsync(unused -> {
-            List<AtlasManager.PendingHotSprite> prepared = loads.stream().map(CompletableFuture::join).toList();
-            boolean requiresRestitch = prepared.stream()
-                .anyMatch(value -> value.contents == null || !value.atlasEntry.atlas.allcraftCanReplace(value.existing, value.contents));
-            if (requiresRestitch) {
-                prepared.forEach(AtlasManager.PendingHotSprite::closeContents);
-                return new AtlasManager.HotReloadResult(0, true);
-            }
-            for (AtlasManager.PendingHotSprite value : prepared) {
-                try {
-                    value.atlasEntry.atlas.allcraftReplace(value.existing, value.contents);
-                } finally {
-                    value.closeContents();
+            Map<AtlasManager.AtlasEntry, Map<Identifier, SpriteContents>> replacements = new HashMap<>();
+            Map<AtlasManager.AtlasEntry, Set<Identifier>> deletions = new HashMap<>();
+            for (CompletableFuture<AtlasManager.PendingHotSprite> load : loads) {
+                AtlasManager.PendingHotSprite pending = load.join();
+                if (pending.contents == null) {
+                    deletions.computeIfAbsent(pending.atlasEntry, ignored -> new java.util.HashSet<>()).add(pending.spriteId);
+                } else {
+                    replacements.computeIfAbsent(pending.atlasEntry, ignored -> new HashMap<>()).put(pending.spriteId, pending.contents);
                 }
             }
-            return new AtlasManager.HotReloadResult(prepared.size(), false);
+            return this.allcraftApplyAtlasDiffs(replacements, deletions);
         }, reloadExecutor);
+    }
+
+    private CompletableFuture<AtlasManager.HotReloadResult> allcraftResolveAndApply(
+        ResourceManager resourceManager,
+        Set<Identifier> targetSprites,
+        Executor taskExecutor,
+        Executor reloadExecutor
+    ) {
+        List<AtlasManager.AtlasEntry> entries = List.copyOf(this.atlasByTexture.values());
+        List<CompletableFuture<SpriteLoader.Preparations>> preparations = entries.stream()
+            .map(
+                entry -> entry.scheduleLoad(resourceManager, taskExecutor, this.maxMipmapLevels)
+                    .thenCompose(prepared -> prepared.readyForUpload().thenApply(unused -> prepared))
+            )
+            .toList();
+        return CompletableFuture.allOf(preparations.toArray(CompletableFuture[]::new)).thenApplyAsync(unused -> {
+            Map<AtlasManager.AtlasEntry, Map<Identifier, SpriteContents>> replacements = new HashMap<>();
+            Map<AtlasManager.AtlasEntry, Set<Identifier>> deletions = new HashMap<>();
+            for (int i = 0; i < entries.size(); i++) {
+                AtlasManager.AtlasEntry atlasEntry = entries.get(i);
+                SpriteLoader.Preparations prepared = preparations.get(i).join();
+                Set<Identifier> expected = prepared.regions().keySet();
+                Set<Identifier> current = atlasEntry.atlas.allcraftSprites().keySet();
+                Set<Identifier> selected = new java.util.HashSet<>(targetSprites);
+                // Directory and transformed atlas sources can map a resource path to a different
+                // sprite id (particle/live.png -> allcraft:live, palette permutations, filters).
+                // A prospective source snapshot therefore owns all set additions/removals even
+                // when the direct texture-path heuristic cannot name the resulting sprite.
+                expected.stream().filter(id -> !current.contains(id)).forEach(selected::add);
+                current.stream().filter(id -> !expected.contains(id)).forEach(selected::add);
+                for (TextureAtlasSprite candidate : prepared.regions().values()) {
+                    TextureAtlasSprite committed = atlasEntry.atlas.allcraftSprites().get(candidate.contents().name());
+                    if (committed != null && committed.contents().allcraftFingerprint() != candidate.contents().allcraftFingerprint()) {
+                        selected.add(candidate.contents().name());
+                    }
+                }
+                Map<Identifier, SpriteContents> atlasReplacements = replacements.computeIfAbsent(atlasEntry, ignored -> new HashMap<>());
+                Set<Identifier> atlasDeletions = deletions.computeIfAbsent(atlasEntry, ignored -> new java.util.HashSet<>());
+                for (TextureAtlasSprite candidate : prepared.regions().values()) {
+                    if (selected.contains(candidate.contents().name())) {
+                        atlasReplacements.put(candidate.contents().name(), candidate.contents());
+                    } else {
+                        candidate.close();
+                    }
+                }
+                for (Identifier selectedId : selected) {
+                    if (!expected.contains(selectedId) && atlasEntry.atlas.allcraftSprites().containsKey(selectedId)) {
+                        atlasDeletions.add(selectedId);
+                    }
+                }
+            }
+            return new AtlasManager.ResolvedAtlasDiff(replacements, deletions);
+        }, taskExecutor).thenApplyAsync(diff -> this.allcraftApplyAtlasDiffs(diff.replacements, diff.deletions), reloadExecutor);
+    }
+
+    private AtlasManager.HotReloadResult allcraftApplyAtlasDiffs(
+        Map<AtlasManager.AtlasEntry, Map<Identifier, SpriteContents>> replacements,
+        Map<AtlasManager.AtlasEntry, Set<Identifier>> deletions
+    ) {
+        int updated = 0;
+        int deleted = 0;
+        boolean structural = false;
+        boolean animation = false;
+        boolean modelRebake = false;
+        Set<AtlasManager.AtlasEntry> appliedEntries = new java.util.HashSet<>();
+        try {
+            Set<AtlasManager.AtlasEntry> entries = new java.util.HashSet<>(replacements.keySet());
+            entries.addAll(deletions.keySet());
+            for (AtlasManager.AtlasEntry entry : entries) {
+                TextureAtlas.AllcraftAtlasUpdate result = entry.atlas.allcraftApply(
+                    replacements.getOrDefault(entry, Map.of()), deletions.getOrDefault(entry, Set.of())
+                );
+                appliedEntries.add(entry);
+                updated += result.replacements();
+                deleted += result.deletions();
+                structural |= result.structural();
+                animation |= result.animationChanged();
+                modelRebake |= result.structural()
+                    && (entry.config.definitionLocation.equals(AtlasIds.BLOCKS) || entry.config.definitionLocation.equals(AtlasIds.ITEMS));
+            }
+            this.allcraftRebuildSpriteLookup();
+            return new AtlasManager.HotReloadResult(updated, deleted, structural, animation, modelRebake, false);
+        } catch (TextureAtlas.AllcraftAtlasCapacityException e) {
+            replacements.forEach((entry, contents) -> {
+                if (!appliedEntries.contains(entry)) {
+                    contents.values().forEach(SpriteContents::close);
+                }
+            });
+            LOGGER.warn("Stable atlas reserve exhausted; requesting staged full atlas reload", e);
+            return new AtlasManager.HotReloadResult(updated, deleted, true, animation, true, true);
+        }
+    }
+
+    /** Called after staged consumers can no longer need the old CPU-side sprite images. */
+    public void allcraftReleaseRetiredContents() {
+        this.atlasByTexture.values().forEach(entry -> entry.atlas.allcraftReleaseRetiredContents());
+    }
+
+    /** Called after every compiled section has left the previous model/UV generation. */
+    public void allcraftReleaseRetiredAllocations() {
+        this.atlasByTexture.values().forEach(entry -> entry.atlas.allcraftReleaseRetiredAllocations());
+    }
+
+    private void allcraftRebuildSpriteLookup() {
+        Map<SpriteId, TextureAtlasSprite> result = new HashMap<>();
+        this.atlasByTexture.forEach(
+            (atlasTexture, entry) -> entry.atlas.allcraftSprites().forEach((id, sprite) -> result.put(new SpriteId(atlasTexture, id), sprite))
+        );
+        this.spriteLookup = Map.copyOf(result);
+    }
+
+    private static @Nullable Identifier allcraftTextureResourceToSprite(Identifier resource) {
+        String path = resource.getPath();
+        if (!path.startsWith("textures/") || !path.endsWith(".png")) {
+            return null;
+        }
+        return Identifier.fromNamespaceAndPath(resource.getNamespace(), path.substring("textures/".length(), path.length() - ".png".length()));
+    }
+
+    private static Identifier allcraftSpriteToTextureResource(Identifier sprite) {
+        return Identifier.fromNamespaceAndPath(sprite.getNamespace(), "textures/" + sprite.getPath() + ".png");
     }
 
     /** Provides current atlas coordinates to a model-only rebake without restitching or uploading any atlas. */
@@ -285,15 +422,31 @@ public class AtlasManager implements AutoCloseable, PreparableReloadListener, Sp
         }
     }
 
-    public record HotReloadResult(int updatedSprites, boolean requiresRestitch) {
+    public record HotReloadResult(
+        int updatedSprites,
+        int deletedSprites,
+        boolean structural,
+        boolean animationChanged,
+        boolean modelRebakeRequired,
+        boolean requiresFullAtlas
+    ) {
+        private static final AtlasManager.HotReloadResult EMPTY = new AtlasManager.HotReloadResult(0, 0, false, false, false, false);
     }
 
-    private record PendingHotSprite(AtlasManager.AtlasEntry atlasEntry, TextureAtlasSprite existing, @Nullable SpriteContents contents) {
+    private record PendingHotSprite(
+        AtlasManager.AtlasEntry atlasEntry, Identifier spriteId, TextureAtlasSprite existing, @Nullable SpriteContents contents
+    ) {
         private void closeContents() {
             if (this.contents != null) {
                 this.contents.close();
             }
         }
+    }
+
+    private record ResolvedAtlasDiff(
+        Map<AtlasManager.AtlasEntry, Map<Identifier, SpriteContents>> replacements,
+        Map<AtlasManager.AtlasEntry, Set<Identifier>> deletions
+    ) {
     }
 
     public static class PendingStitchResults {

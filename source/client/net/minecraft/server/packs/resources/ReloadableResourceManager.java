@@ -66,6 +66,18 @@ public class ReloadableResourceManager implements AutoCloseable, ResourceManager
         );
     }
 
+    /** Returns registered listeners of the requested types in vanilla registration order. */
+    public List<PreparableReloadListener> allcraftListeners(Class<?>... types) {
+        return this.listeners.stream().filter(listener -> {
+            for (Class<?> type : types) {
+                if (type.isInstance(listener)) {
+                    return true;
+                }
+            }
+            return false;
+        }).toList();
+    }
+
     /** Full-listener fallback against the already-installed resource stack. */
     public ReloadInstance allcraftCreateFullReload(
         Executor backgroundExecutor, Executor mainThreadExecutor, CompletableFuture<Unit> initialTask

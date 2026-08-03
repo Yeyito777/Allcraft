@@ -12,6 +12,7 @@ import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Collection;
 import java.util.OptionalDouble;
 import java.util.function.Supplier;
 import net.neoforged.api.distmarker.Dist;
@@ -47,6 +48,17 @@ public interface GpuDeviceBackend {
     boolean isDebuggingEnabled();
 
     CompiledRenderPipeline precompilePipeline(RenderPipeline pipeline, @Nullable ShaderSource shaderSource);
+
+    /** Compiles into a candidate cache and publishes it only if every required pipeline is valid. */
+    boolean allcraftStagePipelineCache(Collection<RenderPipeline> pipelines, ShaderSource shaderSource);
+
+    void allcraftBeginPipelineCacheTransaction();
+
+    CompiledRenderPipeline allcraftStagePipeline(RenderPipeline pipeline, ShaderSource shaderSource);
+
+    void allcraftCommitPipelineCacheTransaction();
+
+    void allcraftCancelPipelineCacheTransaction();
 
     void clearPipelineCache();
 

@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
+import java.util.zip.CRC32C;
 import java.util.stream.IntStream;
 import net.minecraft.CrashReport;
 import net.minecraft.CrashReportCategory;
@@ -108,6 +109,36 @@ public class SpriteContents implements AutoCloseable, Stitcher.Entry {
 
     public boolean isAnimated() {
         return this.getFrameCount() > 1;
+    }
+
+    /** Content/metadata signature used by Allcraft's prospective atlas-source diff. */
+    public long allcraftFingerprint() {
+        CRC32C crc = new CRC32C();
+        crc.update(this.originalImage.getPixelBytes().duplicate());
+        allcraftUpdateFingerprint(crc, this.width);
+        allcraftUpdateFingerprint(crc, this.height);
+        allcraftUpdateFingerprint(crc, Float.floatToRawIntBits(this.alphaCutoffBias));
+        allcraftUpdateFingerprint(crc, this.mipmapStrategy.ordinal());
+        if (this.animatedTexture != null) {
+            allcraftUpdateFingerprint(crc, this.animatedTexture.frameRowSize);
+            allcraftUpdateFingerprint(crc, this.animatedTexture.interpolateFrames ? 1 : 0);
+            for (SpriteContents.FrameInfo frame : this.animatedTexture.frames) {
+                allcraftUpdateFingerprint(crc, frame.index);
+                allcraftUpdateFingerprint(crc, frame.time);
+            }
+        }
+        for (MetadataSectionType.WithValue<?> metadata : this.additionalMetadata) {
+            byte[] value = metadata.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            crc.update(value, 0, value.length);
+        }
+        return crc.getValue();
+    }
+
+    private static void allcraftUpdateFingerprint(CRC32C crc, int value) {
+        crc.update(value);
+        crc.update(value >>> 8);
+        crc.update(value >>> 16);
+        crc.update(value >>> 24);
     }
 
     public Transparency transparency() {

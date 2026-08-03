@@ -19,11 +19,14 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.Map.Entry;
 import net.minecraft.SharedConstants;
 import net.minecraft.client.renderer.RenderPipelines;
@@ -45,6 +48,8 @@ public class TextureAtlas extends AbstractTexture implements TickableTexture, Du
     @Deprecated
     public static final Identifier LOCATION_PARTICLES = Identifier.withDefaultNamespace("textures/atlas/particles.png");
     private List<TextureAtlasSprite> sprites = List.of();
+    private final List<AllcraftRetiredAllocation> allcraftRetiredAllocations = new ArrayList<>();
+    private final List<SpriteContents> allcraftRetiredContents = new ArrayList<>();
     private List<SpriteContents.AnimationState> animatedTexturesStates = List.of();
     private Map<Identifier, TextureAtlasSprite> texturesByName = Map.of();
     private @Nullable TextureAtlasSprite missingSprite;
@@ -89,50 +94,8 @@ public class TextureAtlas extends AbstractTexture implements TickableTexture, Du
             throw new IllegalStateException("Atlas '" + this.location + "' (" + this.texturesByName.size() + " sprites) has no missing texture sprite");
         }
 
-        Builder<TextureAtlasSprite> spritesBuilder = ImmutableList.builder();
-        int animatedSpriteCount = 0;
-
-        for (TextureAtlasSprite sprite : preparations.regions().values()) {
-            spritesBuilder.add(sprite);
-            if (sprite.isAnimated()) {
-                animatedSpriteCount++;
-            }
-        }
-
-        this.sprites = spritesBuilder.build();
-        if (animatedSpriteCount > 0) {
-            Builder<SpriteContents.AnimationState> animationStates = ImmutableList.builder();
-            int spriteUboSize = Mth.roundToward(SpriteContents.UBO_SIZE, RenderSystem.getDevice().getDeviceInfo().limits().minUniformOffsetAlignment());
-            int uboBlockSize = spriteUboSize * this.mipLevelCount;
-            ByteBuffer spriteUboBuffer = MemoryUtil.memAlloc(animatedSpriteCount * uboBlockSize);
-            int animationIndex = 0;
-
-            for (TextureAtlasSprite sprite : this.sprites) {
-                if (sprite.isAnimated()) {
-                    sprite.uploadSpriteUbo(spriteUboBuffer, animationIndex * uboBlockSize, this.maxMipLevel, this.width, this.height, spriteUboSize);
-                    animationIndex++;
-                }
-            }
-
-            GpuBuffer spriteUbos = RenderSystem.getDevice().createBuffer(() -> this.location + " sprite UBOs", 128, spriteUboBuffer);
-            animationIndex = 0;
-
-            for (TextureAtlasSprite sprite : this.sprites) {
-                if (sprite.isAnimated()) {
-                    SpriteContents.AnimationState animationState = sprite.createAnimationState(
-                        spriteUbos.slice(animationIndex * uboBlockSize, uboBlockSize), spriteUboSize
-                    );
-                    animationIndex++;
-                    if (animationState != null) {
-                        animationStates.add(animationState);
-                    }
-                }
-            }
-
-            this.spriteUbos = spriteUbos;
-            this.animatedTexturesStates = animationStates.build();
-            MemoryUtil.memFree(spriteUboBuffer);
-        }
+        this.sprites = ImmutableList.copyOf(preparations.regions().values());
+        this.allcraftRebuildAnimationStates();
 
         this.uploadInitialContents();
         if (SharedConstants.DEBUG_DUMP_TEXTURE_ATLAS) {
@@ -293,8 +256,6 @@ public class TextureAtlas extends AbstractTexture implements TickableTexture, Du
     public boolean allcraftCanReplace(TextureAtlasSprite existing, SpriteContents replacement) {
         return this.texture != null
             && this.texturesByName.get(replacement.name()) == existing
-            && !existing.isAnimated()
-            && !replacement.isAnimated()
             && existing.contents().width() == replacement.width()
             && existing.contents().height() == replacement.height();
     }
@@ -316,17 +277,119 @@ public class TextureAtlas extends AbstractTexture implements TickableTexture, Du
             existing.getY(),
             existing.allcraftPadding()
         );
+        this.allcraftUploadStaticSprite(uploaded);
+    }
+
+    /**
+     * Applies an atlas diff without resizing the atlas. Existing allocations become tombstones
+     * when a sprite moves or is deleted, so old baked models can continue sampling valid pixels
+     * until their replacement meshes are committed.
+     */
+    public AllcraftAtlasUpdate allcraftApply(Map<Identifier, SpriteContents> replacements, Set<Identifier> deletions) {
+        if (this.texture == null || replacements.isEmpty() && deletions.isEmpty()) {
+            return new AllcraftAtlasUpdate(0, 0, false, false);
+        }
+
+        Map<Identifier, TextureAtlasSprite> active = new HashMap<>(this.texturesByName);
+        Set<Identifier> actualDeletions = new HashSet<>(deletions);
+        actualDeletions.removeAll(replacements.keySet());
+        actualDeletions.remove(MissingTextureAtlasSprite.getLocation());
+        List<AllcraftPlacement> placements = new ArrayList<>();
+        boolean[][] occupied = this.allcraftOccupiedGrid();
+        int unit = 1 << this.maxMipLevel;
+        int padding = this.allcraftDefaultPadding();
+        boolean structural = false;
+        boolean animationChanged = false;
+
+        for (Entry<Identifier, SpriteContents> entry : replacements.entrySet().stream().sorted(Entry.comparingByKey()).toList()) {
+            Identifier id = entry.getKey();
+            SpriteContents contents = entry.getValue();
+            TextureAtlasSprite existing = active.get(id);
+            int x;
+            int y;
+            int spritePadding = existing == null ? padding : existing.allcraftPadding();
+            if (existing != null && existing.contents().width() == contents.width() && existing.contents().height() == contents.height()) {
+                x = existing.getX();
+                y = existing.getY();
+            } else {
+                int allocationWidth = Mth.roundToward(contents.width() + spritePadding * 2, unit);
+                int allocationHeight = Mth.roundToward(contents.height() + spritePadding * 2, unit);
+                int[] slot = allcraftFindFreeSlot(occupied, allocationWidth / unit, allocationHeight / unit);
+                if (slot == null) {
+                    throw new AllcraftAtlasCapacityException(
+                        this.location + " has no stable room for " + id + " (" + allocationWidth + "x" + allocationHeight + ")"
+                    );
+                }
+                x = slot[0] * unit;
+                y = slot[1] * unit;
+                allcraftMark(occupied, slot[0], slot[1], allocationWidth / unit, allocationHeight / unit);
+                structural = true;
+            }
+            if (existing == null) {
+                structural = true;
+            }
+            if (existing != null && existing.isAnimated() != contents.isAnimated()) {
+                animationChanged = true;
+            } else if (contents.isAnimated()) {
+                animationChanged = true;
+            }
+            placements.add(new AllcraftPlacement(id, existing, contents, x, y, spritePadding));
+        }
+
+        for (Identifier id : actualDeletions) {
+            TextureAtlasSprite removed = active.remove(id);
+            if (removed != null) {
+                this.allcraftRetire(removed, true);
+                structural = true;
+                animationChanged |= removed.isAnimated();
+            }
+        }
+        for (AllcraftPlacement placement : placements) {
+            TextureAtlasSprite replacement = new TextureAtlasSprite(
+                this.location,
+                placement.contents,
+                this.width,
+                this.height,
+                placement.x,
+                placement.y,
+                placement.padding
+            );
+            active.put(placement.id, replacement);
+            if (placement.existing != null) {
+                boolean moved = placement.existing.getX() != placement.x
+                    || placement.existing.getY() != placement.y
+                    || placement.existing.contents().width() != placement.contents.width()
+                    || placement.existing.contents().height() != placement.contents.height();
+                this.allcraftRetire(placement.existing, moved);
+            }
+            placement.uploaded = replacement;
+        }
+
+        this.texturesByName = Map.copyOf(active);
+        this.missingSprite = this.texturesByName.get(MissingTextureAtlasSprite.getLocation());
+        this.sprites = ImmutableList.copyOf(this.texturesByName.values());
+        this.allcraftRebuildAnimationStates();
+        for (AllcraftPlacement placement : placements) {
+            if (!placement.uploaded.isAnimated()) {
+                this.allcraftUploadStaticSprite(placement.uploaded);
+            }
+        }
+        this.uploadAnimationFrames();
+        return new AllcraftAtlasUpdate(placements.size(), actualDeletions.size(), structural, animationChanged);
+    }
+
+    private void allcraftUploadStaticSprite(TextureAtlasSprite uploaded) {
         GpuDevice device = RenderSystem.getDevice();
         int spriteUboSize = Mth.roundToward(SpriteContents.UBO_SIZE, device.getDeviceInfo().limits().minUniformOffsetAlignment());
         int uboBlockSize = spriteUboSize * this.mipLevelCount;
         ByteBuffer buffer = MemoryUtil.memAlloc(uboBlockSize);
         uploaded.uploadSpriteUbo(buffer, 0, this.maxMipLevel, this.width, this.height, spriteUboSize);
         GpuTexture scratchTexture = device.createTexture(
-            () -> replacement.name() + " Allcraft hot reload",
+            () -> uploaded.contents().name() + " Allcraft hot reload",
             5,
             GpuFormat.RGBA8_UNORM,
-            replacement.width(),
-            replacement.height(),
+            uploaded.contents().width(),
+            uploaded.contents().height(),
             1,
             this.mipLevelCount
         );
@@ -339,7 +402,7 @@ public class TextureAtlas extends AbstractTexture implements TickableTexture, Du
         try (GpuBuffer ubo = device.createBuffer(() -> "AllcraftSpriteHotReload", 128, buffer)) {
             for (int level = 0; level < this.mipLevelCount; level++) {
                 try (RenderPass renderPass = device.createCommandEncoder()
-                        .createRenderPass(() -> "Allcraft hot reload " + replacement.name(), this.mipViews[level], Optional.empty())) {
+                        .createRenderPass(() -> "Allcraft hot reload " + uploaded.contents().name(), this.mipViews[level], Optional.empty())) {
                     RenderSystem.bindDefaultUniforms(renderPass);
                     renderPass.setPipeline(RenderPipelines.ANIMATE_SPRITE_BLIT);
                     renderPass.bindTexture("Sprite", views[level], sampler);
@@ -358,12 +421,122 @@ public class TextureAtlas extends AbstractTexture implements TickableTexture, Du
         }
     }
 
+    private void allcraftRebuildAnimationStates() {
+        this.animatedTexturesStates.forEach(SpriteContents.AnimationState::close);
+        this.animatedTexturesStates = List.of();
+        if (this.spriteUbos != null) {
+            this.spriteUbos.close();
+            this.spriteUbos = null;
+        }
+        List<TextureAtlasSprite> animated = this.sprites.stream().filter(TextureAtlasSprite::isAnimated).toList();
+        if (animated.isEmpty()) {
+            return;
+        }
+        GpuDevice device = RenderSystem.getDevice();
+        int spriteUboSize = Mth.roundToward(SpriteContents.UBO_SIZE, device.getDeviceInfo().limits().minUniformOffsetAlignment());
+        int uboBlockSize = spriteUboSize * this.mipLevelCount;
+        ByteBuffer spriteUboBuffer = MemoryUtil.memAlloc(animated.size() * uboBlockSize);
+        for (int i = 0; i < animated.size(); i++) {
+            animated.get(i).uploadSpriteUbo(spriteUboBuffer, i * uboBlockSize, this.maxMipLevel, this.width, this.height, spriteUboSize);
+        }
+        this.spriteUbos = device.createBuffer(() -> this.location + " sprite UBOs", 128, spriteUboBuffer);
+        Builder<SpriteContents.AnimationState> states = ImmutableList.builder();
+        for (int i = 0; i < animated.size(); i++) {
+            SpriteContents.AnimationState state = animated.get(i).createAnimationState(this.spriteUbos.slice(i * uboBlockSize, uboBlockSize), spriteUboSize);
+            if (state != null) {
+                states.add(state);
+            }
+        }
+        this.animatedTexturesStates = states.build();
+        MemoryUtil.memFree(spriteUboBuffer);
+    }
+
+    private boolean[][] allcraftOccupiedGrid() {
+        int unit = 1 << this.maxMipLevel;
+        boolean[][] occupied = new boolean[this.height / unit][this.width / unit];
+        for (TextureAtlasSprite sprite : this.texturesByName.values()) {
+            int width = Mth.roundToward(sprite.contents().width() + sprite.allcraftPadding() * 2, unit) / unit;
+            int height = Mth.roundToward(sprite.contents().height() + sprite.allcraftPadding() * 2, unit) / unit;
+            allcraftMark(occupied, sprite.getX() / unit, sprite.getY() / unit, width, height);
+        }
+        for (AllcraftRetiredAllocation allocation : this.allcraftRetiredAllocations) {
+            int width = Mth.roundToward(allocation.width + allocation.padding * 2, unit) / unit;
+            int height = Mth.roundToward(allocation.height + allocation.padding * 2, unit) / unit;
+            allcraftMark(occupied, allocation.x / unit, allocation.y / unit, width, height);
+        }
+        return occupied;
+    }
+
+    private void allcraftRetire(TextureAtlasSprite sprite, boolean preserveAllocation) {
+        if (preserveAllocation) {
+            this.allcraftRetiredAllocations.add(
+                new AllcraftRetiredAllocation(
+                    sprite.getX(), sprite.getY(), sprite.contents().width(), sprite.contents().height(), sprite.allcraftPadding()
+                )
+            );
+        }
+        this.allcraftRetiredContents.add(sprite.contents());
+    }
+
+    /**
+     * Releases CPU images and stable-coordinate tombstones after every old consumer has published
+     * its replacement. Until this point the rectangles remain unavailable, so an old mesh can
+     * never sample pixels belonging to a newer sprite.
+     */
+    public void allcraftReleaseRetiredContents() {
+        this.allcraftRetiredContents.forEach(SpriteContents::close);
+        this.allcraftRetiredContents.clear();
+    }
+
+    /** Frees coordinate tombstones only after every compiled section uses the new model generation. */
+    public void allcraftReleaseRetiredAllocations() {
+        this.allcraftRetiredAllocations.clear();
+    }
+
+    private int allcraftDefaultPadding() {
+        return this.sprites.isEmpty() ? 1 << this.maxMipLevel : this.sprites.getFirst().allcraftPadding();
+    }
+
+    private static int @Nullable [] allcraftFindFreeSlot(boolean[][] occupied, int width, int height) {
+        for (int y = 0; y + height <= occupied.length; y++) {
+            for (int x = 0; x + width <= occupied[y].length; x++) {
+                boolean free = true;
+                for (int yy = y; free && yy < y + height; yy++) {
+                    for (int xx = x; xx < x + width; xx++) {
+                        if (occupied[yy][xx]) {
+                            free = false;
+                            break;
+                        }
+                    }
+                }
+                if (free) {
+                    return new int[]{x, y};
+                }
+            }
+        }
+        return null;
+    }
+
+    private static void allcraftMark(boolean[][] occupied, int x, int y, int width, int height) {
+        for (int yy = y; yy < y + height && yy < occupied.length; yy++) {
+            for (int xx = x; xx < x + width && xx < occupied[yy].length; xx++) {
+                occupied[yy][xx] = true;
+            }
+        }
+    }
+
+    public Map<Identifier, TextureAtlasSprite> allcraftSprites() {
+        return this.texturesByName;
+    }
+
     public TextureAtlasSprite missingSprite() {
         return Objects.requireNonNull(this.missingSprite, "Atlas not initialized");
     }
 
     public void clearTextureData() {
         this.sprites.forEach(TextureAtlasSprite::close);
+        this.allcraftReleaseRetiredContents();
+        this.allcraftReleaseRetiredAllocations();
         this.sprites = List.of();
         this.animatedTexturesStates.forEach(SpriteContents.AnimationState::close);
         this.animatedTexturesStates = List.of();
@@ -408,5 +581,38 @@ public class TextureAtlas extends AbstractTexture implements TickableTexture, Du
 
     int getHeight() {
         return this.height;
+    }
+
+    public record AllcraftAtlasUpdate(int replacements, int deletions, boolean structural, boolean animationChanged) {
+    }
+
+    public static class AllcraftAtlasCapacityException extends RuntimeException {
+        public AllcraftAtlasCapacityException(String message) {
+            super(message);
+        }
+    }
+
+    private static final class AllcraftPlacement {
+        private final Identifier id;
+        private final @Nullable TextureAtlasSprite existing;
+        private final SpriteContents contents;
+        private final int x;
+        private final int y;
+        private final int padding;
+        private @Nullable TextureAtlasSprite uploaded;
+
+        private AllcraftPlacement(
+            Identifier id, @Nullable TextureAtlasSprite existing, SpriteContents contents, int x, int y, int padding
+        ) {
+            this.id = id;
+            this.existing = existing;
+            this.contents = contents;
+            this.x = x;
+            this.y = y;
+            this.padding = padding;
+        }
+    }
+
+    private record AllcraftRetiredAllocation(int x, int y, int width, int height, int padding) {
     }
 }

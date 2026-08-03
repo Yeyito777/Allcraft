@@ -64,6 +64,15 @@ public class ChannelAccess {
         this.channels.clear();
     }
 
+    /** Releases one handle on the sound executor before a replacement source is acquired. */
+    public void allcraftRelease(ChannelAccess.ChannelHandle handle) {
+        this.executor.execute(() -> {
+            if (this.channels.remove(handle)) {
+                handle.release();
+            }
+        });
+    }
+
     public class ChannelHandle {
         private @Nullable Channel channel;
         private boolean stopped;
