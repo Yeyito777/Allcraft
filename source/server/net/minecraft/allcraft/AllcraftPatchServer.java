@@ -298,6 +298,11 @@ public final class AllcraftPatchServer {
                             patch.serverTransaction = AllcraftRuntime.stage(patch.serverArtifactPath, patch.serverSha256);
                         }
                         patch.serverApplyResult = patch.serverTransaction.publish();
+                        if (patch.serverTransaction.hasRegistryMutations()) {
+                            AllcraftRegistries.refreshComponents(server.registryAccess());
+                        }
+                        patch.registryPlan = patch.serverTransaction.registryPlan();
+                        patch.registryDigest = AllcraftRegistries.fingerprint();
                         patch.serverResourceFuture = AllcraftServerResources.apply(
                             server, run.patchesRoot, patch.serverArtifactPath, run.testName
                         );
@@ -408,7 +413,20 @@ public final class AllcraftPatchServer {
         } else if (ack.status() == AllcraftPayloads.AckStatus.READY && run.phase == Phase.WAITING_FOR_READY) {
             run.readyPlayers.add(player.getUUID());
         } else if (ack.status() == AllcraftPayloads.AckStatus.APPLIED && run.phase == Phase.WAITING_FOR_APPLIED) {
-            run.appliedPlayers.add(player.getUUID());
+            if (!patch.registryDigest.equals(ack.registryDigest())) {
+                abortRun(
+                    server,
+                    run,
+                    player.getName().getString()
+                        + " applied a different registry ID map (server "
+                        + patch.registryDigest
+                        + ", client "
+                        + ack.registryDigest()
+                        + ")"
+                );
+            } else {
+                run.appliedPlayers.add(player.getUUID());
+            }
         } else if (ack.status() == AllcraftPayloads.AckStatus.COMMITTED && run.phase == Phase.WAITING_FOR_COMMITTED) {
             run.committedPlayers.add(player.getUUID());
         } else if (ack.status() == AllcraftPayloads.AckStatus.ROLLED_BACK && run.phase == Phase.WAITING_FOR_ROLLBACK) {
@@ -554,7 +572,7 @@ public final class AllcraftPatchServer {
                     case "timing" -> new StepSpec(
                         "title", "Timing patch delayed by " + timingDelays[step - 1] + " ticks", step * 256, timingDelays[step - 1]
                     );
-                    case "double-jump", "no-world-gen", "flying-boats", "new-class",
+                    case "double-jump", "no-world-gen", "flying-boats", "new-class", "registry-block",
                         "live-texture", "live-model", "live-sound", "live-language", "live-recipe", "live-resource-delete",
                         "asset-new-sprite", "asset-resized-sprite", "asset-animated-sprite", "asset-atlas-delete", "asset-font",
                         "asset-shader", "asset-particle", "asset-gui", "asset-live-sound", "asset-mass-model", "asset-atlas-manifest" -> new StepSpec(
@@ -650,7 +668,9 @@ public final class AllcraftPatchServer {
                 patch.step,
                 run.totalSteps,
                 patch.activationTick,
-                patch.clientSha256
+                patch.clientSha256,
+                patch.registryPlan,
+                patch.registryDigest
             )
         );
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
@@ -952,6 +972,8 @@ public final class AllcraftPatchServer {
         private boolean clientCacheHit;
         private boolean serverCacheHit;
         private long compilationMillis;
+        private String registryPlan = "[]";
+        private String registryDigest = "";
 
         private Patch(
             String patchId,

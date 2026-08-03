@@ -15,6 +15,7 @@ import net.minecraft.client.renderer.culling.Frustum;
 import net.minecraft.client.renderer.state.level.ParticlesRenderState;
 import net.minecraft.core.particles.ParticleLimit;
 import net.minecraft.core.particles.ParticleOptions;
+import net.minecraft.core.particles.ParticleType;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.util.RandomSource;
 import net.minecraft.util.profiling.Profiler;
@@ -47,6 +48,16 @@ public class ParticleEngine {
 
     public void createTrackingEmitter(Entity entity, ParticleOptions particle, int lifeTime) {
         this.trackingEmitters.add(new TrackingEmitter(this.level, entity, particle, lifeTime));
+    }
+
+    public <T extends ParticleOptions> void allcraftRegister(ParticleType<T> type, ParticleProvider<T> provider) {
+        this.resourceManager.register(type, provider);
+    }
+
+    public <T extends ParticleOptions> void allcraftRegister(
+        ParticleType<T> type, ParticleResources.SpriteParticleRegistration<T> provider
+    ) {
+        this.resourceManager.register(type, provider);
     }
 
     public @Nullable Particle createParticle(ParticleOptions options, double x, double y, double z, double xa, double ya, double za) {

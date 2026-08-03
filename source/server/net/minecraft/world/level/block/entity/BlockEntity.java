@@ -41,9 +41,9 @@ import org.slf4j.Logger;
 public abstract class BlockEntity implements DebugValueSource, TypedInstance<BlockEntityType<?>> {
    private static final Codec<BlockEntityType<?>> TYPE_CODEC = BuiltInRegistries.BLOCK_ENTITY_TYPE.byNameCodec();
    private static final Logger LOGGER = LogUtils.getLogger();
-   private final BlockEntityType<?> type;
+   private BlockEntityType<?> type;
    protected @Nullable Level level;
-   protected final BlockPos worldPosition;
+   protected BlockPos worldPosition;
    protected boolean remove;
    private BlockState blockState;
    private DataComponentMap components = DataComponentMap.EMPTY;

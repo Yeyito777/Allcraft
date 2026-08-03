@@ -3,6 +3,7 @@ package net.minecraft.client.gui.screens;
 import com.google.common.collect.Maps;
 import com.mojang.logging.LogUtils;
 import java.util.Map;
+import net.minecraft.allcraft.AllcraftRegistries;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.AnvilScreen;
 import net.minecraft.client.gui.screens.inventory.BeaconScreen;
@@ -53,12 +54,23 @@ public class MenuScreens {
         return (MenuScreens.ScreenConstructor<T, ?>)SCREENS.get(type);
     }
 
-    private static <M extends AbstractContainerMenu, U extends Screen & MenuAccess<M>> void register(
+    public static synchronized <M extends AbstractContainerMenu, U extends Screen & MenuAccess<M>> void register(
         MenuType<? extends M> type, MenuScreens.ScreenConstructor<M, U> factory
     ) {
         MenuScreens.ScreenConstructor<?, ?> prev = SCREENS.put(type, factory);
-        if (prev != null) {
+        if (prev != null && !AllcraftRegistries.mutationAllowed()) {
             throw new IllegalStateException("Duplicate registration for " + BuiltInRegistries.MENU.getKey(type));
+        }
+        if (AllcraftRegistries.mutationAllowed()) {
+            AllcraftRegistries.recordUndo("restore menu screen for " + BuiltInRegistries.MENU.getKey(type), () -> {
+                synchronized (MenuScreens.class) {
+                    if (prev == null) {
+                        SCREENS.remove(type);
+                    } else {
+                        SCREENS.put(type, prev);
+                    }
+                }
+            });
         }
     }
 
@@ -103,7 +115,7 @@ public class MenuScreens {
         register(MenuType.STONECUTTER, StonecutterScreen::new);
     }
 
-    private interface ScreenConstructor<T extends AbstractContainerMenu, U extends Screen & MenuAccess<T>> {
+    public interface ScreenConstructor<T extends AbstractContainerMenu, U extends Screen & MenuAccess<T>> {
         default void fromPacket(Component title, MenuType<T> type, Minecraft minecraft, int containerId) {
             U screen = this.create(type.create(containerId, minecraft.player.getInventory()), minecraft.player.getInventory(), title);
             minecraft.player.containerMenu = screen.getMenu();

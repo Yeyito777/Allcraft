@@ -5,7 +5,7 @@ import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 
 public abstract class ParticleType<T extends ParticleOptions> {
-   private final boolean overrideLimiter;
+   private boolean overrideLimiter;
 
    protected ParticleType(final boolean overrideLimiter) {
       this.overrideLimiter = overrideLimiter;

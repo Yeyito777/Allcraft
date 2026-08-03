@@ -26,9 +26,9 @@ import org.jspecify.annotations.Nullable;
 
 public abstract class Fluid {
    public static final IdMapper<FluidState> FLUID_STATE_REGISTRY = new IdMapper<>();
-   protected final StateDefinition<Fluid, FluidState> stateDefinition;
+   protected StateDefinition<Fluid, FluidState> stateDefinition;
    private FluidState defaultFluidState;
-   private final Holder.Reference<Fluid> builtInRegistryHolder = BuiltInRegistries.FLUID.createIntrusiveHolder(this);
+   private Holder.Reference<Fluid> builtInRegistryHolder = BuiltInRegistries.FLUID.createIntrusiveHolder(this);
 
    protected Fluid() {
       StateDefinition.Builder<Fluid, FluidState> builder = new StateDefinition.Builder<>(this);

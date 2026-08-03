@@ -16,6 +16,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
+import net.minecraft.allcraft.AllcraftRegistries;
 import net.minecraft.client.renderer.texture.SpriteLoader;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.resources.model.sprite.AtlasManager;
@@ -183,14 +184,42 @@ public class ParticleResources implements PreparableReloadListener {
         this.register(ParticleTypes.SULFUR_CUBE_GOO, BreakingItemParticle.SulfurCubeProvider::new);
     }
 
-    private <T extends ParticleOptions> void register(ParticleType<T> type, ParticleProvider<T> provider) {
-        this.providers.put(BuiltInRegistries.PARTICLE_TYPE.getId(type), provider);
+    public synchronized <T extends ParticleOptions> void register(ParticleType<T> type, ParticleProvider<T> provider) {
+        int id = BuiltInRegistries.PARTICLE_TYPE.getId(type);
+        ParticleProvider<?> previous = this.providers.put(id, provider);
+        AllcraftRegistries.recordUndo("restore particle provider " + BuiltInRegistries.PARTICLE_TYPE.getKey(type), () -> {
+            synchronized (ParticleResources.this) {
+                if (previous == null) {
+                    ParticleResources.this.providers.remove(id);
+                } else {
+                    ParticleResources.this.providers.put(id, previous);
+                }
+            }
+        });
     }
 
-    private <T extends ParticleOptions> void register(ParticleType<T> type, ParticleResources.SpriteParticleRegistration<T> provider) {
+    public synchronized <T extends ParticleOptions> void register(ParticleType<T> type, ParticleResources.SpriteParticleRegistration<T> provider) {
+        Identifier key = BuiltInRegistries.PARTICLE_TYPE.getKey(type);
+        int id = BuiltInRegistries.PARTICLE_TYPE.getId(type);
+        ParticleResources.MutableSpriteSet previousSprites = this.spriteSets.get(key);
+        ParticleProvider<?> previousProvider = this.providers.get(id);
         ParticleResources.MutableSpriteSet spriteSet = new ParticleResources.MutableSpriteSet();
-        this.spriteSets.put(BuiltInRegistries.PARTICLE_TYPE.getKey(type), spriteSet);
-        this.providers.put(BuiltInRegistries.PARTICLE_TYPE.getId(type), provider.create(spriteSet));
+        this.spriteSets.put(key, spriteSet);
+        this.providers.put(id, provider.create(spriteSet));
+        AllcraftRegistries.recordUndo("restore sprite particle provider " + key, () -> {
+            synchronized (ParticleResources.this) {
+                if (previousSprites == null) {
+                    ParticleResources.this.spriteSets.remove(key);
+                } else {
+                    ParticleResources.this.spriteSets.put(key, previousSprites);
+                }
+                if (previousProvider == null) {
+                    ParticleResources.this.providers.remove(id);
+                } else {
+                    ParticleResources.this.providers.put(id, previousProvider);
+                }
+            }
+        });
     }
 
     @Override
@@ -308,7 +337,7 @@ public class ParticleResources implements PreparableReloadListener {
     }
 
     @FunctionalInterface
-    private interface SpriteParticleRegistration<T extends ParticleOptions> {
+    public interface SpriteParticleRegistration<T extends ParticleOptions> {
         ParticleProvider<T> create(SpriteSet spriteSet);
     }
 }

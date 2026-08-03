@@ -114,10 +114,10 @@ public class Item implements ItemLike, FeatureElement {
    public static final int ABSOLUTE_MAX_STACK_SIZE = 99;
    public static final int MAX_BAR_WIDTH = 13;
    protected static final int APPROXIMATELY_INFINITE_USE_DURATION = 72000;
-   private final Holder.Reference<Item> builtInRegistryHolder = BuiltInRegistries.ITEM.createIntrusiveHolder(this);
-   private final @Nullable ItemStackTemplate craftingRemainingItem;
-   protected final String descriptionId;
-   private final FeatureFlagSet requiredFeatures;
+   private Holder.Reference<Item> builtInRegistryHolder = BuiltInRegistries.ITEM.createIntrusiveHolder(this);
+   private @Nullable ItemStackTemplate craftingRemainingItem;
+   protected String descriptionId;
+   private FeatureFlagSet requiredFeatures;
 
    public static int getId(final Item item) {
       return item == null ? 0 : BuiltInRegistries.ITEM.getId(item);

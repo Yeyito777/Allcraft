@@ -95,7 +95,9 @@ public final class AllcraftPayloads {
         int step,
         int totalSteps,
         long activationTick,
-        String sha256
+        String sha256,
+        String registryPlan,
+        String registryDigest
     ) implements CustomPacketPayload {
         public static final CustomPacketPayload.Type<AllcraftPayloads.PatchControl> TYPE = AllcraftPayloads.type("patch_control");
         public static final StreamCodec<RegistryFriendlyByteBuf, AllcraftPayloads.PatchControl> STREAM_CODEC = CustomPacketPayload.codec(
@@ -113,6 +115,8 @@ public final class AllcraftPayloads {
                 input.readVarInt(),
                 input.readVarInt(),
                 input.readVarLong(),
+                input.readUtf(64),
+                input.readUtf(262144),
                 input.readUtf(64)
             );
         }
@@ -128,6 +132,8 @@ public final class AllcraftPayloads {
             output.writeVarInt(this.totalSteps);
             output.writeVarLong(this.activationTick);
             output.writeUtf(this.sha256, 64);
+            output.writeUtf(this.registryPlan, 262144);
+            output.writeUtf(this.registryDigest, 64);
         }
 
         @Override
@@ -143,6 +149,7 @@ public final class AllcraftPayloads {
         String patchId,
         long revision,
         String sha256,
+        String registryDigest,
         String message
     ) implements CustomPacketPayload {
         public static final CustomPacketPayload.Type<AllcraftPayloads.PatchAck> TYPE = AllcraftPayloads.type("patch_ack");
@@ -158,6 +165,7 @@ public final class AllcraftPayloads {
                 input.readUtf(36),
                 input.readVarLong(),
                 input.readUtf(64),
+                input.readUtf(64),
                 input.readUtf(512)
             );
         }
@@ -169,6 +177,7 @@ public final class AllcraftPayloads {
             output.writeUtf(this.patchId, 36);
             output.writeVarLong(this.revision);
             output.writeUtf(this.sha256, 64);
+            output.writeUtf(this.registryDigest, 64);
             output.writeUtf(this.message, 512);
         }
 

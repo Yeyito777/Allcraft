@@ -23,157 +23,158 @@ import net.minecraft.util.RandomSource;
 import org.jspecify.annotations.Nullable;
 
 public interface Registry<T> extends IdMap<T>, Keyable, HolderLookup.RegistryLookup<T> {
-    @Override
-    ResourceKey<? extends Registry<T>> key();
+   @Override
+   ResourceKey<? extends Registry<T>> key();
 
-    default Codec<T> byNameCodec() {
-        return this.referenceHolderWithLifecycle().flatComapMap(Holder.Reference::value, value -> this.safeCastToReference(this.wrapAsHolder((T)value)));
-    }
+   default Codec<T> byNameCodec() {
+      return this.referenceHolderWithLifecycle().flatComapMap(Holder.Reference::value, value -> this.safeCastToReference(this.wrapAsHolder((T)value)));
+   }
 
-    default Codec<Holder<T>> holderByNameCodec() {
-        return this.referenceHolderWithLifecycle().flatComapMap(holder -> (Holder<T>)holder, this::safeCastToReference);
-    }
+   default Codec<Holder<T>> holderByNameCodec() {
+      return this.referenceHolderWithLifecycle().flatComapMap(holder -> holder, this::safeCastToReference);
+   }
 
-    private Codec<Holder.Reference<T>> referenceHolderWithLifecycle() {
-        Codec<Holder.Reference<T>> referenceCodec = Identifier.CODEC
-            .comapFlatMap(
-                name -> this.get(name).map(DataResult::success).orElseGet(() -> DataResult.error(() -> "Unknown registry key in " + this.key() + ": " + name)),
-                holder -> holder.key().identifier()
-            );
-        return ExtraCodecs.overrideLifecycle(
-            referenceCodec, e -> this.registrationInfo(e.key()).map(RegistrationInfo::lifecycle).orElse(Lifecycle.experimental())
-        );
-    }
+   private Codec<Holder.Reference<T>> referenceHolderWithLifecycle() {
+      Codec<Holder.Reference<T>> referenceCodec = Identifier.CODEC
+         .comapFlatMap(
+            name -> this.get(name)
+               .<DataResult<Holder.Reference<T>>>map(DataResult::success)
+               .orElseGet(() -> DataResult.error(() -> "Unknown registry key in " + this.key() + ": " + name)),
+            (Holder.Reference<T> holder) -> holder.key().identifier()
+         );
+      return ExtraCodecs.overrideLifecycle(
+         referenceCodec, e -> this.registrationInfo(e.key()).map(RegistrationInfo::lifecycle).orElse(Lifecycle.experimental())
+      );
+   }
 
-    private DataResult<Holder.Reference<T>> safeCastToReference(Holder<T> holder) {
-        return holder instanceof Holder.Reference<T> reference
-            ? DataResult.success(reference)
-            : DataResult.error(() -> "Unregistered holder in " + this.key() + ": " + holder);
-    }
+   private DataResult<Holder.Reference<T>> safeCastToReference(final Holder<T> holder) {
+      return holder instanceof Holder.Reference<T> reference
+         ? DataResult.success(reference)
+         : DataResult.error(() -> "Unregistered holder in " + this.key() + ": " + holder);
+   }
 
-    @Override
-    default <U> Stream<U> keys(DynamicOps<U> ops) {
-        return this.keySet().stream().map(k -> ops.createString(k.toString()));
-    }
+   default <U> Stream<U> keys(final DynamicOps<U> ops) {
+      return this.keySet().stream().map(k -> (U)ops.createString(k.toString()));
+   }
 
-    @Nullable Identifier getKey(T thing);
+   @Nullable Identifier getKey(T thing);
 
-    Optional<ResourceKey<T>> getResourceKey(T thing);
+   Optional<ResourceKey<T>> getResourceKey(T thing);
 
-    @Override
-    int getId(@Nullable T thing);
+   @Override
+   int getId(@Nullable T thing);
 
-    @Nullable T getValue(@Nullable ResourceKey<T> key);
+   @Nullable T getValue(@Nullable ResourceKey<T> key);
 
-    @Nullable T getValue(@Nullable Identifier key);
+   @Nullable T getValue(@Nullable Identifier key);
 
-    Optional<RegistrationInfo> registrationInfo(ResourceKey<T> element);
+   Optional<RegistrationInfo> registrationInfo(ResourceKey<T> element);
 
-    default Optional<T> getOptional(@Nullable Identifier key) {
-        return Optional.ofNullable(this.getValue(key));
-    }
+   default Optional<T> getOptional(final @Nullable Identifier key) {
+      return Optional.ofNullable(this.getValue(key));
+   }
 
-    default Optional<T> getOptional(@Nullable ResourceKey<T> key) {
-        return Optional.ofNullable(this.getValue(key));
-    }
+   default Optional<T> getOptional(final @Nullable ResourceKey<T> key) {
+      return Optional.ofNullable(this.getValue(key));
+   }
 
-    Optional<Holder.Reference<T>> getAny();
+   Optional<Holder.Reference<T>> getAny();
 
-    default T getValueOrThrow(ResourceKey<T> key) {
-        T value = this.getValue(key);
-        if (value == null) {
-            throw new IllegalStateException("Missing key in " + this.key() + ": " + key);
-        } else {
-            return value;
-        }
-    }
+   default T getValueOrThrow(final ResourceKey<T> key) {
+      T value = this.getValue(key);
+      if (value == null) {
+         throw new IllegalStateException("Missing key in " + this.key() + ": " + key);
+      } else {
+         return value;
+      }
+   }
 
-    Set<Identifier> keySet();
+   Set<Identifier> keySet();
 
-    Set<Entry<ResourceKey<T>, T>> entrySet();
+   Set<Entry<ResourceKey<T>, T>> entrySet();
 
-    Set<ResourceKey<T>> registryKeySet();
+   Set<ResourceKey<T>> registryKeySet();
 
-    Optional<Holder.Reference<T>> getRandom(RandomSource random);
+   Optional<Holder.Reference<T>> getRandom(RandomSource random);
 
-    default Stream<T> stream() {
-        return StreamSupport.stream(this.spliterator(), false);
-    }
+   default Stream<T> stream() {
+      return StreamSupport.stream(this.spliterator(), false);
+   }
 
-    boolean containsKey(Identifier key);
+   boolean containsKey(Identifier key);
 
-    boolean containsKey(ResourceKey<T> key);
+   boolean containsKey(ResourceKey<T> key);
 
-    static <T> T register(Registry<? super T> registry, String name, T value) {
-        return register(registry, Identifier.parse(name), value);
-    }
+   static <T> T register(final Registry<? super T> registry, final String name, final T value) {
+      return register(registry, Identifier.parse(name), value);
+   }
 
-    static <V, T extends V> T register(Registry<V> registry, Identifier location, T value) {
-        return register(registry, ResourceKey.create(registry.key(), location), value);
-    }
+   static <V, T extends V> T register(final Registry<V> registry, final Identifier location, final T value) {
+      return register(registry, ResourceKey.create(registry.key(), location), value);
+   }
 
-    static <V, T extends V> T register(Registry<V> registry, ResourceKey<V> key, T value) {
-        ((WritableRegistry)registry).register(key, (V)value, RegistrationInfo.BUILT_IN);
-        return value;
-    }
+   static <V, T extends V> T register(final Registry<V> registry, final ResourceKey<V> key, final T value) {
+      Holder.Reference<V> holder = ((WritableRegistry<V>)registry).register(key, value, RegistrationInfo.BUILT_IN);
+      return holder.isBound() ? (T)holder.value() : value;
+   }
 
-    static <R, T extends R> Holder.Reference<T> registerForHolder(Registry<R> registry, ResourceKey<R> key, T value) {
-        return ((WritableRegistry)registry).register(key, (R)value, RegistrationInfo.BUILT_IN);
-    }
+   static <R, T extends R> Holder.Reference<T> registerForHolder(final Registry<R> registry, final ResourceKey<R> key, final T value) {
+      return ((WritableRegistry)registry).register(key, (R)value, RegistrationInfo.BUILT_IN);
+   }
 
-    static <R, T extends R> Holder.Reference<T> registerForHolder(Registry<R> registry, Identifier location, T value) {
-        return registerForHolder(registry, ResourceKey.create(registry.key(), location), value);
-    }
+   static <R, T extends R> Holder.Reference<T> registerForHolder(final Registry<R> registry, final Identifier location, final T value) {
+      return registerForHolder(registry, ResourceKey.create(registry.key(), location), value);
+   }
 
-    Registry<T> freeze();
+   Registry<T> freeze();
 
-    Holder.Reference<T> createIntrusiveHolder(T value);
+   Holder.Reference<T> createIntrusiveHolder(T value);
 
-    Optional<Holder.Reference<T>> get(int id);
+   Optional<Holder.Reference<T>> get(int id);
 
-    Optional<Holder.Reference<T>> get(Identifier id);
+   Optional<Holder.Reference<T>> get(Identifier id);
 
-    Holder<T> wrapAsHolder(T value);
+   Holder<T> wrapAsHolder(T value);
 
-    default Iterable<Holder<T>> getTagOrEmpty(TagKey<T> id) {
-        return DataFixUtils.orElse(this.get(id), List.of());
-    }
+   default Iterable<Holder<T>> getTagOrEmpty(final TagKey<T> id) {
+      return (Iterable<Holder<T>>)DataFixUtils.orElse(this.get(id), List.of());
+   }
 
-    Stream<HolderSet.Named<T>> getTags();
+   Stream<HolderSet.Named<T>> getTags();
 
-    default IdMap<Holder<T>> asHolderIdMap() {
-        return new IdMap<Holder<T>>() {
-            public int getId(Holder<T> thing) {
-                return Registry.this.getId(thing.value());
-            }
+   default IdMap<Holder<T>> asHolderIdMap() {
+      return new IdMap<Holder<T>>() {
+         public int getId(final Holder<T> thing) {
+            return Registry.this.getId(thing.value());
+         }
 
-            public @Nullable Holder<T> byId(int id) {
-                return (Holder<T>)Registry.this.get(id).orElse(null);
-            }
+         public @Nullable Holder<T> byId(final int id) {
+            return (Holder<T>)Registry.this.get(id).orElse(null);
+         }
 
-            @Override
-            public int size() {
-                return Registry.this.size();
-            }
+         @Override
+         public int size() {
+            return Registry.this.size();
+         }
 
-            @Override
-            public Iterator<Holder<T>> iterator() {
-                return Registry.this.listElements().map(e -> (Holder<T>)e).iterator();
-            }
-        };
-    }
+         @Override
+         public Iterator<Holder<T>> iterator() {
+            return Registry.this.listElements().map(e -> (Holder<T>)e).iterator();
+         }
+      };
+   }
 
-    Registry.PendingTags<T> prepareTagReload(TagLoader.LoadResult<T> tags);
+   Registry.PendingTags<T> prepareTagReload(TagLoader.LoadResult<T> tags);
 
-    DataComponentLookup<T> componentLookup();
+   DataComponentLookup<T> componentLookup();
 
-    interface PendingTags<T> {
-        ResourceKey<? extends Registry<? extends T>> key();
+   interface PendingTags<T> {
+      ResourceKey<? extends Registry<? extends T>> key();
 
-        HolderLookup.RegistryLookup<T> lookup();
+      HolderLookup.RegistryLookup<T> lookup();
 
-        void apply();
+      void apply();
 
-        int size();
-    }
+      int size();
+   }
 }

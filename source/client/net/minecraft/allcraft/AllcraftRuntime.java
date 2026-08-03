@@ -144,7 +144,7 @@ public final class AllcraftRuntime {
         for (int index = ACTIVE_REVISIONS.size() - 1; index >= 0; index--) {
             Transaction committed = ACTIVE_REVISIONS.get(index);
             committed.sealed = false;
-            rollback(committed);
+            rollback(committed, true);
         }
         ACTIVE_REVISIONS.clear();
 
@@ -302,7 +302,10 @@ public final class AllcraftRuntime {
                 CURRENT_DEFINITIONS.putAll(earlyChanged);
                 transaction.published = true;
             }
-            invokeHooks(transaction.hooks.prepare, "allcraftPrepare", transaction.context);
+            AllcraftRegistries.run(
+                transaction.registryTransaction,
+                () -> invokeHooks(transaction.hooks.prepare, "allcraftPrepare", transaction.context)
+            );
 
             Map<String, Class<?>> loaded = loadedClasses(instrumentation, loader);
             for (Map.Entry<String, byte[]> entry : transaction.classes.entrySet()) {
@@ -362,8 +365,12 @@ public final class AllcraftRuntime {
                 CURRENT_DEFINITIONS.putAll(changed);
             }
             transaction.published = true;
-            invokeHooks(transaction.hooks.migrate, "allcraftMigrate", transaction.context);
-            invokeEntrypoints(transaction.entrypoints, loader);
+            AllcraftRegistries.run(
+                transaction.registryTransaction,
+                () -> invokeHooks(transaction.hooks.migrate, "allcraftMigrate", transaction.context)
+            );
+            AllcraftRegistries.run(transaction.registryTransaction, () -> invokeEntrypoints(transaction.entrypoints, loader));
+            transaction.registryTransaction.closePublication();
         } catch (Exception | Error failure) {
             // Appended search paths are process-lifetime state by Instrumentation contract. Keep
             // the JarFile open and let rollback tombstone any introduced class that was loaded.
@@ -404,7 +411,10 @@ public final class AllcraftRuntime {
         if (!transaction.published || transaction.finished) {
             return;
         }
-        invokeHooks(transaction.hooks.commit, "allcraftCommit", transaction.context);
+        AllcraftRegistries.run(
+            transaction.registryTransaction,
+            () -> invokeHooks(transaction.hooks.commit, "allcraftCommit", transaction.context)
+        );
         transaction.finished = true;
         PENDING_COMMITS.add(transaction);
     }
@@ -419,12 +429,28 @@ public final class AllcraftRuntime {
     }
 
     private static synchronized void rollback(Transaction transaction) throws Exception {
+        rollback(transaction, false);
+    }
+
+    private static synchronized void rollback(Transaction transaction, boolean retainRegistryAdditions) throws Exception {
         if ((!transaction.prepared && !transaction.published) || transaction.rolledBack || transaction.sealed) {
             return;
         }
         List<Throwable> errors = new ArrayList<>();
         try {
-            invokeHooks(transaction.hooks.rollback, "allcraftRollback", transaction.context);
+            AllcraftRegistries.run(
+                transaction.registryTransaction,
+                () -> invokeHooks(transaction.hooks.rollback, "allcraftRollback", transaction.context)
+            );
+        } catch (Throwable failure) {
+            errors.add(failure);
+        }
+        try {
+            if (retainRegistryAdditions) {
+                transaction.registryTransaction.rollbackRetainingAdditions();
+            } else {
+                transaction.registryTransaction.rollback();
+            }
         } catch (Throwable failure) {
             errors.add(failure);
         }
@@ -693,6 +719,7 @@ public final class AllcraftRuntime {
         private final Map<String, byte[]> publishedPrevious = new LinkedHashMap<>();
         private final Set<String> introducedClasses = new LinkedHashSet<>();
         private final MigrationContext context;
+        private final AllcraftRegistries.Transaction registryTransaction;
         private boolean prepared;
         private boolean published;
         private boolean finished;
@@ -726,6 +753,9 @@ public final class AllcraftRuntime {
             this.entrypoints = entrypoints;
             this.stagedPrevious = new LinkedHashMap<>(previous);
             this.context = context;
+            this.registryTransaction = AllcraftRegistries.transaction(
+                context.worldId(), context.side(), context.toRevision(), context.patchId()
+            );
         }
 
         public synchronized ApplyResult publish() throws Exception {
@@ -758,6 +788,22 @@ public final class AllcraftRuntime {
 
         public MigrationContext context() {
             return this.context;
+        }
+
+        public synchronized void expectRegistryPlan(String plan) {
+            this.registryTransaction.expect(plan);
+        }
+
+        public synchronized String registryPlan() {
+            return this.registryTransaction.planJson();
+        }
+
+        public synchronized boolean hasRegistryMutations() {
+            return this.registryTransaction.changed();
+        }
+
+        public synchronized int registryMutationCount() {
+            return this.registryTransaction.mutationCount();
         }
     }
 

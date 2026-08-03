@@ -77,8 +77,8 @@ No-argument forms are also accepted. Hook sources are automatically included in 
 4. Publish dedicated prepare/rollback hook implementations.
 5. Run `prepare` against the old game revision.
 6. Atomically redefine loaded classes and activate genuine additions at the scheduled tick.
-7. Run `migrate`, legacy activation entrypoints, and resource/data publication.
-8. Peers report `APPLIED`.
+7. Run `migrate`, legacy activation entrypoints, the server-assigned registry plan, and resource/data publication.
+8. Peers report `APPLIED` with a complete registry-ID fingerprint; any disagreement aborts publication.
 9. Run `commit`; peers report `COMMITTED`.
 10. Persist the source snapshot and manifest, send `FINALIZE`, and seal the revision into the world-exit rollback chain.
 
@@ -88,7 +88,7 @@ Any failure before finalization sends `ABORT`. Class definitions are restored, n
 
 - `patches/transaction.json` records staged, scheduled, publishing, committing, and rollback phases.
 - On restart, the committed manifest remains authoritative. An interrupted uncommitted revision runs its dedicated rollback hook without replaying migration.
-- Committed revisions retain reversible definition chains in process memory. Leaving a world unwinds them in reverse order, restores base classes, and tombstones world-only additions.
+- Committed revisions retain reversible definition chains in process memory. Leaving a world unwinds them in reverse order, restores base classes, tombstones world-only classes, and retires published registry identities without reusing their IDs.
 - Reopening a world replays its immutable ordered artifacts. Remote client disconnect also clears in-flight transactions and restores base code/resources.
 
 ## Regression tests

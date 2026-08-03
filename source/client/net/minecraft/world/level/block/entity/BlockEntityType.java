@@ -10,39 +10,39 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.jspecify.annotations.Nullable;
 
 public class BlockEntityType<T extends BlockEntity> {
-    private final BlockEntityType.BlockEntitySupplier<? extends T> factory;
-    private final Set<Block> validBlocks;
-    private final Holder.Reference<BlockEntityType<?>> builtInRegistryHolder = BuiltInRegistries.BLOCK_ENTITY_TYPE.createIntrusiveHolder(this);
+   private BlockEntityType.BlockEntitySupplier<? extends T> factory;
+   private Set<Block> validBlocks;
+   private Holder.Reference<BlockEntityType<?>> builtInRegistryHolder = BuiltInRegistries.BLOCK_ENTITY_TYPE.createIntrusiveHolder(this);
 
-    public BlockEntityType(BlockEntityType.BlockEntitySupplier<? extends T> factory, Set<Block> validBlocks) {
-        this.factory = factory;
-        this.validBlocks = validBlocks;
-    }
+   public BlockEntityType(final BlockEntityType.BlockEntitySupplier<? extends T> factory, final Set<Block> validBlocks) {
+      this.factory = factory;
+      this.validBlocks = validBlocks;
+   }
 
-    public T create(BlockPos worldPosition, BlockState blockState) {
-        return (T)this.factory.create(worldPosition, blockState);
-    }
+   public T create(final BlockPos worldPosition, final BlockState blockState) {
+      return (T)this.factory.create(worldPosition, blockState);
+   }
 
-    public boolean isValid(BlockState state) {
-        return this.validBlocks.contains(state.getBlock());
-    }
+   public boolean isValid(final BlockState state) {
+      return this.validBlocks.contains(state.getBlock());
+   }
 
-    @Deprecated
-    public Holder.Reference<BlockEntityType<?>> builtInRegistryHolder() {
-        return this.builtInRegistryHolder;
-    }
+   @Deprecated
+   public Holder.Reference<BlockEntityType<?>> builtInRegistryHolder() {
+      return this.builtInRegistryHolder;
+   }
 
-    public @Nullable T getBlockEntity(BlockGetter level, BlockPos pos) {
-        BlockEntity entity = level.getBlockEntity(pos);
-        return (T)(entity != null && entity.getType() == this ? entity : null);
-    }
+   public @Nullable T getBlockEntity(final BlockGetter level, final BlockPos pos) {
+      BlockEntity entity = level.getBlockEntity(pos);
+      return (T)(entity != null && entity.getType() == this ? entity : null);
+   }
 
-    public boolean onlyOpCanSetNbt() {
-        return BlockEntityTypes.OP_ONLY_CUSTOM_DATA.contains(this);
-    }
+   public boolean onlyOpCanSetNbt() {
+      return BlockEntityTypes.OP_ONLY_CUSTOM_DATA.contains(this);
+   }
 
-    @FunctionalInterface
-    public interface BlockEntitySupplier<T extends BlockEntity> {
-        T create(BlockPos worldPosition, BlockState blockState);
-    }
+   @FunctionalInterface
+   public interface BlockEntitySupplier<T extends BlockEntity> {
+      T create(BlockPos worldPosition, BlockState blockState);
+   }
 }

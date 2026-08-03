@@ -78,7 +78,7 @@ import org.slf4j.Logger;
 public class Block extends BlockBehaviour implements ItemLike {
    public static final MapCodec<Block> CODEC = simpleCodec(Block::new);
    private static final Logger LOGGER = LogUtils.getLogger();
-   private final Holder.Reference<Block> builtInRegistryHolder = BuiltInRegistries.BLOCK.createIntrusiveHolder(this);
+   private Holder.Reference<Block> builtInRegistryHolder = BuiltInRegistries.BLOCK.createIntrusiveHolder(this);
    public static final IdMapper<BlockState> BLOCK_STATE_REGISTRY = new IdMapper<>();
    private static final LoadingCache<VoxelShape, Boolean> SHAPE_FULL_BLOCK_CACHE = CacheBuilder.newBuilder()
       .maximumSize(512L)
@@ -105,7 +105,7 @@ public class Block extends BlockBehaviour implements ItemLike {
    public static final float INDESTRUCTIBLE = -1.0F;
    public static final float INSTANT = 0.0F;
    public static final int UPDATE_LIMIT = 512;
-   protected final StateDefinition<Block, BlockState> stateDefinition;
+   protected StateDefinition<Block, BlockState> stateDefinition;
    private BlockState defaultBlockState;
    private @Nullable Item item;
    private static final int CACHE_SIZE = 256;
@@ -604,7 +604,7 @@ public class Block extends BlockBehaviour implements ItemLike {
    }
 
    private static <S extends StateHolder<?, S>, T extends Comparable<T>> S setValueHelper(final S state, final Property<T> property, final Object value) {
-      return state.setValue(property, (Comparable)value);
+      return (S)state.setValue((Property)property, (Comparable)value);
    }
 
    @Deprecated

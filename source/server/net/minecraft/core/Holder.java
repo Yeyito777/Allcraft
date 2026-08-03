@@ -134,6 +134,7 @@ public sealed interface Holder<T> permits Holder.Direct, Holder.Reference {
       private final Holder.Reference.Type type;
       private @Nullable ResourceKey<T> key;
       private @Nullable T value;
+      private Holder.@Nullable Reference<T> allcraftAlias;
 
       protected Reference(final Holder.Reference.Type type, final HolderOwner<T> owner, final @Nullable ResourceKey<T> key, final @Nullable T value) {
          this.owner = owner;
@@ -152,6 +153,9 @@ public sealed interface Holder<T> permits Holder.Direct, Holder.Reference {
       }
 
       public ResourceKey<T> key() {
+         if (this.allcraftAlias != null) {
+            return this.allcraftAlias.key();
+         }
          if (this.key == null) {
             throw new IllegalStateException("Trying to access unbound value '" + this.value + "' from registry " + this.owner);
          } else {
@@ -161,6 +165,9 @@ public sealed interface Holder<T> permits Holder.Direct, Holder.Reference {
 
       @Override
       public T value() {
+         if (this.allcraftAlias != null) {
+            return this.allcraftAlias.value();
+         }
          if (this.value == null) {
             throw new IllegalStateException("Trying to access unbound value '" + this.key + "' from registry " + this.owner);
          } else {
@@ -179,6 +186,9 @@ public sealed interface Holder<T> permits Holder.Direct, Holder.Reference {
       }
 
       private Set<TagKey<T>> boundTags() {
+         if (this.allcraftAlias != null) {
+            return this.allcraftAlias.boundTags();
+         }
          if (this.tags == null) {
             throw new IllegalStateException("Tags not bound");
          } else {
@@ -223,15 +233,19 @@ public sealed interface Holder<T> permits Holder.Direct, Holder.Reference {
 
       @Override
       public boolean isBound() {
-         return this.key != null && this.value != null;
+         return this.allcraftAlias != null ? this.allcraftAlias.isBound() : this.key != null && this.value != null;
       }
 
       @Override
       public boolean areComponentsBound() {
-         return this.components != null;
+         return this.allcraftAlias != null ? this.allcraftAlias.areComponentsBound() : this.components != null;
       }
 
       void bindKey(final ResourceKey<T> key) {
+         if (this.allcraftAlias != null) {
+            this.allcraftAlias.bindKey(key);
+            return;
+         }
          if (this.key != null && key != this.key) {
             throw new IllegalStateException("Can't change holder key: existing=" + this.key + ", new=" + key);
          }
@@ -240,7 +254,11 @@ public sealed interface Holder<T> permits Holder.Direct, Holder.Reference {
       }
 
       protected void bindValue(final T value) {
-         if (this.type == Holder.Reference.Type.INTRUSIVE && this.value != value) {
+         if (this.allcraftAlias != null) {
+            this.allcraftAlias.bindValue(value);
+            return;
+         }
+         if (this.type == Holder.Reference.Type.INTRUSIVE && this.value != value && !net.minecraft.allcraft.AllcraftRegistries.mutationAllowed()) {
             throw new IllegalStateException("Can't change holder " + this.key + " value: existing=" + this.value + ", new=" + value);
          }
 
@@ -248,21 +266,37 @@ public sealed interface Holder<T> permits Holder.Direct, Holder.Reference {
       }
 
       void bindTags(final Collection<TagKey<T>> tags) {
+         if (this.allcraftAlias != null) {
+            this.allcraftAlias.bindTags(tags);
+            return;
+         }
          this.tags = Set.copyOf(tags);
       }
 
       public void bindComponents(final DataComponentMap components) {
+         if (this.allcraftAlias != null) {
+            this.allcraftAlias.bindComponents(components);
+            return;
+         }
          this.components = components;
+      }
+
+      public void allcraftAlias(final Holder.Reference<T> target) {
+         if (target != this) {
+            this.allcraftAlias = target.allcraftAlias == null ? target : target.allcraftAlias;
+         }
       }
 
       @Override
       public Stream<TagKey<T>> tags() {
-         return this.boundTags().stream();
+         return this.allcraftAlias != null ? this.allcraftAlias.tags() : this.boundTags().stream();
       }
 
       @Override
       public DataComponentMap components() {
-         return Objects.requireNonNull(this.components, "Components not bound yet");
+         return this.allcraftAlias != null
+            ? this.allcraftAlias.components()
+            : Objects.requireNonNull(this.components, "Components not bound yet");
       }
 
       @Override

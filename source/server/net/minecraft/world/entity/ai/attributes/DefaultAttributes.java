@@ -2,7 +2,9 @@ package net.minecraft.world.entity.ai.attributes;
 
 import com.google.common.collect.ImmutableMap;
 import com.mojang.logging.LogUtils;
+import java.util.IdentityHashMap;
 import java.util.Map;
+import net.minecraft.allcraft.AllcraftRegistries;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.util.Util;
 import net.minecraft.world.entity.EntityType;
@@ -93,7 +95,7 @@ import org.slf4j.Logger;
 
 public class DefaultAttributes {
    private static final Logger LOGGER = LogUtils.getLogger();
-   private static final Map<EntityType<? extends LivingEntity>, AttributeSupplier> SUPPLIERS = ImmutableMap.builder()
+   private static final Map<EntityType<? extends LivingEntity>, AttributeSupplier> SUPPLIERS = new IdentityHashMap<>(ImmutableMap.<EntityType<? extends LivingEntity>, AttributeSupplier>builder()
       .put(EntityTypes.ALLAY, Allay.createAttributes().build())
       .put(EntityTypes.ARMADILLO, Armadillo.createAttributes().build())
       .put(EntityTypes.ARMOR_STAND, ArmorStand.createAttributes().build())
@@ -187,7 +189,30 @@ public class DefaultAttributes {
       .put(EntityTypes.ZOMBIE_NAUTILUS, ZombieNautilus.createAttributes().build())
       .put(EntityTypes.ZOMBIE_VILLAGER, Zombie.createAttributes().build())
       .put(EntityTypes.ZOMBIFIED_PIGLIN, ZombifiedPiglin.createAttributes().build())
-      .build();
+      .build());
+
+   public static synchronized <T extends LivingEntity> void register(final EntityType<T> type, final AttributeSupplier supplier) {
+      AttributeSupplier previous = SUPPLIERS.put(type, supplier);
+      AllcraftRegistries.recordUndo("restore default attributes for " + BuiltInRegistries.ENTITY_TYPE.getKey(type), () -> {
+         synchronized (DefaultAttributes.class) {
+            if (previous == null) {
+               SUPPLIERS.remove(type);
+            } else {
+               SUPPLIERS.put(type, previous);
+            }
+         }
+      });
+   }
+
+   public static synchronized void unregister(final EntityType<? extends LivingEntity> type) {
+      AttributeSupplier previous = SUPPLIERS.remove(type);
+      if (previous != null) {
+         AllcraftRegistries.recordUndo(
+            "restore default attributes for " + BuiltInRegistries.ENTITY_TYPE.getKey(type),
+            () -> SUPPLIERS.put(type, previous)
+         );
+      }
+   }
 
    public static AttributeSupplier getSupplier(final EntityType<? extends LivingEntity> type) {
       return SUPPLIERS.get(type);

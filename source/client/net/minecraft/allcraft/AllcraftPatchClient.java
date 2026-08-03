@@ -221,7 +221,11 @@ public final class AllcraftPatchClient {
                 throw new IOException("Patch was not staged before activation");
             }
 
+            staged.runtime.expectRegistryPlan(payload.registryPlan());
             AllcraftRuntime.ApplyResult runtimeResult = staged.runtime.publish();
+            if (staged.runtime.hasRegistryMutations() && minecraft.level != null) {
+                AllcraftRegistries.refreshComponents(minecraft.level.registryAccess());
+            }
             StagedPatch activation = staged;
             ACTIVE.put(key, new ActivePatch(artifact, activation.runtime, activation.resourcesBefore, runtimeResult, null));
             AllcraftClientResources.apply(
@@ -475,7 +479,14 @@ public final class AllcraftPatchClient {
         connection.send(
             new ServerboundCustomPayloadPacket(
                 new AllcraftPayloads.PatchAck(
-                    status, payload.serverId(), payload.worldId(), payload.patchId(), payload.revision(), payload.sha256(), message
+                    status,
+                    payload.serverId(),
+                    payload.worldId(),
+                    payload.patchId(),
+                    payload.revision(),
+                    payload.sha256(),
+                    AllcraftRegistries.fingerprint(),
+                    message
                 )
             )
         );
@@ -487,7 +498,14 @@ public final class AllcraftPatchClient {
         connection.send(
             new ServerboundCustomPayloadPacket(
                 new AllcraftPayloads.PatchAck(
-                    status, payload.serverId(), payload.worldId(), payload.patchId(), payload.revision(), payload.sha256(), message
+                    status,
+                    payload.serverId(),
+                    payload.worldId(),
+                    payload.patchId(),
+                    payload.revision(),
+                    payload.sha256(),
+                    AllcraftRegistries.fingerprint(),
+                    message
                 )
             )
         );

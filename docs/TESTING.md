@@ -24,6 +24,7 @@ The runtime tests each compile and activate one real source/bytecode patch:
 | `flying-boats` | Redefines client boat-control behavior | Ride a boat; hold Space to rise and Shift to descend |
 | `no-world-gen` | Redefines server chunk-generation classes | Travel into never-generated chunks; they should be empty |
 | `new-class` | Adds and invokes new client and server classes | No manual step; both entrypoints must run for `PASS` |
+| `registry-block` | Adds a synchronized block/item with stable registry and block-state IDs | Craft one dirt or run `/give @s allcraft:runtime_block`, then place it |
 
 The resource tests edit the world's authoritative source, stream resource/data overlays, reload them without a loading screen, and verify the active bytes:
 
@@ -67,5 +68,8 @@ Runtime tests compile from and update the active world's `source/` tree. Server 
 For the non-rendering production-pipeline/JVM regression, run:
 
 ```bash
+tests/registries/run.sh
 tests/code-generality/run.sh
 ```
+
+The registry regression covers server/client ID plans, generic mutation operations, intrusive holders, rollback, process-lifetime retirement, replay, and plan-conflict rejection.

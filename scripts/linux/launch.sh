@@ -47,6 +47,7 @@ exec "$java" \
     -Dallcraft.sourceRoot="$repo_root/source" \
     -Dallcraft.gameDir="$game_dir" \
     -Dallcraft.javac="$java_home/bin/javac" \
+    -Dallcraft.compileClasspath="$(<"$build_dir/compile-classpath.txt")" \
     -Dallcraft.baseVersion=26.2-allcraft \
     -Dminecraft.launcher.brand=Allcraft \
     -Dminecraft.launcher.version=0.1 \

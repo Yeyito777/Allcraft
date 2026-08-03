@@ -53,25 +53,25 @@ import org.slf4j.Logger;
 
 public class EntityType<T extends Entity> implements EntityTypeTest<Entity, T>, FeatureElement {
    private static final Logger LOGGER = LogUtils.getLogger();
-   private final Holder.Reference<EntityType<?>> builtInRegistryHolder = BuiltInRegistries.ENTITY_TYPE.createIntrusiveHolder(this);
+   private Holder.Reference<EntityType<?>> builtInRegistryHolder = BuiltInRegistries.ENTITY_TYPE.createIntrusiveHolder(this);
    public static final Codec<EntityType<?>> CODEC = BuiltInRegistries.ENTITY_TYPE.byNameCodec();
    public static final StreamCodec<RegistryFriendlyByteBuf, EntityType<?>> STREAM_CODEC = ByteBufCodecs.registry(Registries.ENTITY_TYPE);
-   private final EntityType.EntityFactory<T> factory;
-   private final MobCategory category;
-   private final TagKey<Block> immuneTo;
-   private final boolean serialize;
-   private final boolean summon;
-   private final boolean fireImmune;
-   private final boolean canSpawnFarFromPlayer;
-   private final int clientTrackingRange;
-   private final int updateInterval;
-   private final String descriptionId;
+   private EntityType.EntityFactory<T> factory;
+   private MobCategory category;
+   private TagKey<Block> immuneTo;
+   private boolean serialize;
+   private boolean summon;
+   private boolean fireImmune;
+   private boolean canSpawnFarFromPlayer;
+   private int clientTrackingRange;
+   private int updateInterval;
+   private String descriptionId;
    private @Nullable Component description;
-   private final Optional<ResourceKey<LootTable>> lootTable;
-   private final EntityDimensions dimensions;
-   private final float spawnDimensionsScale;
-   private final FeatureFlagSet requiredFeatures;
-   private final boolean allowedInPeaceful;
+   private Optional<ResourceKey<LootTable>> lootTable;
+   private EntityDimensions dimensions;
+   private float spawnDimensionsScale;
+   private FeatureFlagSet requiredFeatures;
+   private boolean allowedInPeaceful;
 
    public static Identifier getKey(final EntityType<?> type) {
       return BuiltInRegistries.ENTITY_TYPE.getKey(type);

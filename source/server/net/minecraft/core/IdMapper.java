@@ -7,6 +7,7 @@ import it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
+import net.minecraft.allcraft.AllcraftRegistries;
 import org.jspecify.annotations.Nullable;
 
 public class IdMapper<T> implements IdMap<T> {
@@ -24,7 +25,16 @@ public class IdMapper<T> implements IdMap<T> {
       this.tToId.defaultReturnValue(-1);
    }
 
-   public void addMapping(final T thing, final int id) {
+   public synchronized void addMapping(final T thing, final int id) {
+      int previousThingId = this.tToId.getInt(thing);
+      T previousAtId = id >= 0 && id < this.idToT.size() ? this.idToT.get(id) : null;
+      int previousNextId = this.nextId;
+      if (previousThingId == id && previousAtId == thing) {
+         return;
+      }
+      if (previousAtId != null && previousAtId != thing) {
+         throw new IllegalStateException("ID " + id + " is already occupied");
+      }
       this.tToId.put(thing, id);
 
       while (this.idToT.size() <= id) {
@@ -35,10 +45,40 @@ public class IdMapper<T> implements IdMap<T> {
       if (this.nextId <= id) {
          this.nextId = id + 1;
       }
+      if (AllcraftRegistries.mutationAllowed()) {
+         AllcraftRegistries.recordRetainedUndo("restore runtime ID mapping " + id, () -> {
+            synchronized (IdMapper.this) {
+               IdMapper.this.tToId.removeInt(thing);
+               if (previousThingId >= 0) {
+                  IdMapper.this.tToId.put(thing, previousThingId);
+               }
+               if (id < IdMapper.this.idToT.size() && IdMapper.this.idToT.get(id) == thing) {
+                  IdMapper.this.idToT.set(id, previousAtId);
+               }
+               while (!IdMapper.this.idToT.isEmpty() && IdMapper.this.idToT.get(IdMapper.this.idToT.size() - 1) == null) {
+                  IdMapper.this.idToT.remove(IdMapper.this.idToT.size() - 1);
+               }
+               IdMapper.this.nextId = previousNextId;
+            }
+         }, () -> {
+            // Published block/fluid state IDs are process-lifetime identities and cannot be reused.
+         });
+      }
    }
 
    public void add(final T thing) {
-      this.addMapping(thing, this.nextId);
+      this.addMapping(thing, this.allcraftNextId());
+   }
+
+   public synchronized int allcraftNextId() {
+      if (AllcraftRegistries.mutationAllowed()) {
+         for (int id = 0; id < this.idToT.size(); id++) {
+            if (this.idToT.get(id) == null) {
+               return id;
+            }
+         }
+      }
+      return this.nextId;
    }
 
    @Override

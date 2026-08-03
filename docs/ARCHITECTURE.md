@@ -117,6 +117,16 @@ Clients never run a Java build when joining or receiving an update.
 
 Actual class redefinition still requires a short JVM safepoint. The bundled Allcraft JBR uses selective code flushing and keeps normal tiered compilation and C2 enabled globally during arbitrary evolution.
 
+### Runtime registry application
+
+- Frozen registries accept writes only under a revision-scoped Allcraft mutation lease; vanilla code cannot mutate them accidentally.
+- The server assigns stable numeric IDs and sends an ordered registry plan with the client artifact.
+- Every client applies the exact IDs and returns a full registry fingerprint with `APPLIED`; a mismatch aborts the revision.
+- Additions, replacements, retirement, controlled removal, intrusive holders, block/fluid state IDs, and common client dispatch maps are journaled for rollback.
+- Published IDs are process-lifetime identities. World exit retains additions as retired tombstones, and artifact replay reactivates them with the same holders and IDs.
+
+See [REGISTRY-EVOLUTION.md](REGISTRY-EVOLUTION.md) for the mutation API and identity rules.
+
 ## Revision and cache strategy
 
 - Allcraft's installed JAR is the static base engine.
@@ -132,8 +142,8 @@ Actual class redefinition still requires a short JVM safepoint. The bundled Allc
 3. The server compiles the affected dependency closure and builds separate client/server artifacts.
 4. The server and clients validate and stage their artifacts; clients report `READY`.
 5. The server announces `ACTIVATE <revision> AT <tick>`.
-6. At that tick, peers publish classes, run migrations, and activate resource/data transactions.
-7. Peers report `APPLIED`; the server requests lifecycle `COMMIT`.
+6. At that tick, peers publish classes, run migrations and the ordered registry plan, and activate resource/data transactions.
+7. Peers report `APPLIED` with the resulting registry fingerprint; the server requests lifecycle `COMMIT` only when every fingerprint agrees.
 8. Peers report `COMMITTED` while retaining rollback definitions.
 9. The server atomically advances the source snapshot and manifest, then sends `FINALIZE`.
 10. Any pre-finalization failure sends `ABORT` and restores the complete committed revision.

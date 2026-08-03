@@ -31,7 +31,9 @@ import org.slf4j.Logger;
 
 /** Server-side compiler for real source-changing Allcraft test patches. */
 public final class AllcraftPatchCompiler {
-    public static final List<String> RUNTIME_TEST_NAMES = List.of("double-jump", "no-world-gen", "flying-boats", "new-class");
+    public static final List<String> RUNTIME_TEST_NAMES = List.of(
+        "double-jump", "no-world-gen", "flying-boats", "new-class", "registry-block"
+    );
     public static final List<String> RESOURCE_TEST_NAMES = List.of(
         "live-texture", "live-model", "live-sound", "live-language", "live-recipe", "live-resource-delete",
         "asset-new-sprite", "asset-resized-sprite", "asset-animated-sprite", "asset-atlas-delete", "asset-font",
@@ -64,6 +66,7 @@ public final class AllcraftPatchCompiler {
             case "flying-boats" -> flyingBoatEdits(worldSource);
             case "no-world-gen" -> noWorldGenerationEdits(worldSource);
             case "new-class" -> newClassEdits(worldSource);
+            case "registry-block" -> registryBlockEdits(worldSource);
             default -> List.of();
         };
         List<ResourceEdit> resourceEdits = resourceEdits(worldSource, testName);
@@ -133,6 +136,7 @@ public final class AllcraftPatchCompiler {
             case "flying-boats" -> flyingBoatEdits(worldSource);
             case "no-world-gen" -> noWorldGenerationEdits(worldSource);
             case "new-class" -> newClassEdits(worldSource);
+            case "registry-block" -> registryBlockEdits(worldSource);
             default -> List.of();
         };
         List<ResourceEdit> resourceEdits = resourceEdits(worldSource, testName);
@@ -297,6 +301,55 @@ public final class AllcraftPatchCompiler {
         );
     }
 
+    private static List<SourceEdit> registryBlockEdits(Path sourceRoot) throws IOException {
+        return List.of(
+            editGenerated(
+                sourceRoot,
+                "client/net/minecraft/allcraft/generated/ClientRegistryBlock.java",
+                registryBlockSource("ClientRegistryBlock", "client")
+            ),
+            editGenerated(
+                sourceRoot,
+                "server/net/minecraft/allcraft/generated/ServerRegistryBlock.java",
+                registryBlockSource("ServerRegistryBlock", "server")
+            )
+        );
+    }
+
+    private static String registryBlockSource(String className, String side) {
+        return "package net.minecraft.allcraft.generated;\n\n"
+            + "import net.minecraft.allcraft.AllcraftRegistries;\n"
+            + "import net.minecraft.core.registries.BuiltInRegistries;\n"
+            + "import net.minecraft.core.registries.Registries;\n"
+            + "import net.minecraft.resources.Identifier;\n"
+            + "import net.minecraft.resources.ResourceKey;\n"
+            + "import net.minecraft.world.item.BlockItem;\n"
+            + "import net.minecraft.world.item.Item;\n"
+            + "import net.minecraft.world.level.block.Block;\n"
+            + "import net.minecraft.world.level.block.Blocks;\n"
+            + "import net.minecraft.world.level.block.state.BlockBehaviour;\n\n"
+            + "public final class " + className + " {\n"
+            + "    private static final Identifier ID = Identifier.fromNamespaceAndPath(\"allcraft\", \"runtime_block\");\n"
+            + "    private static final ResourceKey<Block> BLOCK_KEY = ResourceKey.create(Registries.BLOCK, ID);\n"
+            + "    private static final ResourceKey<Item> ITEM_KEY = ResourceKey.create(Registries.ITEM, ID);\n"
+            + "    public static Block block;\n"
+            + "    public static Item item;\n\n"
+            + "    private " + className + "() {\n"
+            + "    }\n\n"
+            + "    public static void allcraftActivate() {\n"
+            + "        block = AllcraftRegistries.registerLazy(\n"
+            + "            BuiltInRegistries.BLOCK, BLOCK_KEY,\n"
+            + "            () -> new Block(BlockBehaviour.Properties.ofFullCopy(Blocks.DIAMOND_BLOCK).setId(BLOCK_KEY))\n"
+            + "        );\n"
+            + "        item = AllcraftRegistries.registerLazy(\n"
+            + "            BuiltInRegistries.ITEM, ITEM_KEY,\n"
+            + "            () -> new BlockItem(block, new Item.Properties().setId(ITEM_KEY).useBlockDescriptionPrefix())\n"
+            + "        );\n"
+            + "        System.setProperty(\"allcraft.registry-block." + side + "\", Integer.toString(BuiltInRegistries.BLOCK.getId(block)));\n"
+            + "    }\n"
+            + "}\n";
+    }
+
     private static List<ResourceEdit> resourceEdits(Path sourceRoot, String testName) throws IOException {
         return switch (testName) {
             case "live-texture" -> List.of(
@@ -448,6 +501,39 @@ public final class AllcraftPatchCompiler {
                     sourceRoot, "client/assets/minecraft/models/block/dirt.json", cubeAllModel("allcraft:manifest_sprite")
                 )
             );
+            case "registry-block" -> {
+                byte[] recipe = ("{\n"
+                        + "  \"type\": \"minecraft:crafting_shapeless\",\n"
+                        + "  \"category\": \"building\",\n"
+                        + "  \"ingredients\": [\"minecraft:dirt\"],\n"
+                        + "  \"result\": {\"count\": 1, \"id\": \"allcraft:runtime_block\"}\n"
+                        + "}\n")
+                    .getBytes(StandardCharsets.UTF_8);
+                yield List.of(
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/blockstates/runtime_block.json",
+                        "{\n  \"variants\": {\n    \"\": {\"model\": \"allcraft:block/runtime_block\"}\n  }\n}\n".getBytes(StandardCharsets.UTF_8)
+                    ),
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/models/block/runtime_block.json",
+                        cubeAllModel("minecraft:block/diamond_block")
+                    ),
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/items/runtime_block.json",
+                        "{\n  \"model\": {\"type\": \"minecraft:model\", \"model\": \"allcraft:block/runtime_block\"}\n}\n".getBytes(StandardCharsets.UTF_8)
+                    ),
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/lang/en_us.json",
+                        "{\n  \"block.allcraft.runtime_block\": \"Runtime Block\"\n}\n".getBytes(StandardCharsets.UTF_8)
+                    ),
+                    resourceEditGenerated(sourceRoot, "client/data/allcraft/recipe/runtime_block.json", recipe),
+                    resourceEditGenerated(sourceRoot, "server/data/allcraft/recipe/runtime_block.json", recipe)
+                );
+            }
             default -> List.of();
         };
     }
@@ -644,6 +730,7 @@ public final class AllcraftPatchCompiler {
                 yield sources;
             }
             case "new-class" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientRuntimeProbe.java"));
+            case "registry-block" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientRegistryBlock.java"));
             default -> List.of();
         };
     }
@@ -652,6 +739,7 @@ public final class AllcraftPatchCompiler {
         return switch (testName) {
             case "no-world-gen" -> List.of(sourceRoot.resolve(SERVER_NOISE_GENERATOR), sourceRoot.resolve(SERVER_CHUNK_GENERATOR));
             case "new-class" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerRuntimeProbe.java"));
+            case "registry-block" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerRegistryBlock.java"));
             default -> List.of();
         };
     }
@@ -660,12 +748,17 @@ public final class AllcraftPatchCompiler {
         return switch (testName) {
             case "double-jump" -> List.of("net.minecraft.client.player.AllcraftDoubleJump");
             case "new-class" -> List.of("net.minecraft.allcraft.generated.ClientRuntimeProbe");
+            case "registry-block" -> List.of("net.minecraft.allcraft.generated.ClientRegistryBlock");
             default -> List.of();
         };
     }
 
     private static List<String> serverEntrypoints(String testName) {
-        return testName.equals("new-class") ? List.of("net.minecraft.allcraft.generated.ServerRuntimeProbe") : List.of();
+        return switch (testName) {
+            case "new-class" -> List.of("net.minecraft.allcraft.generated.ServerRuntimeProbe");
+            case "registry-block" -> List.of("net.minecraft.allcraft.generated.ServerRegistryBlock");
+            default -> List.of();
+        };
     }
 
     private static String instructions(String testName) {
@@ -674,6 +767,7 @@ public final class AllcraftPatchCompiler {
             case "flying-boats" -> "Ride a boat: hold Space to rise and Shift to descend";
             case "no-world-gen" -> "Travel into never-generated chunks; new terrain should be empty";
             case "new-class" -> "New client and server classes were loaded and their activation methods ran";
+            case "registry-block" -> "Craft one dirt or run /give @s allcraft:runtime_block, then place the new synchronized block";
             case "live-texture" -> "Dirt textures should become a magenta-and-black checkerboard immediately";
             case "live-model" -> "Dirt blocks should immediately render with the diamond-block model texture";
             case "live-sound" -> "The automatic experience-orb preview should play the ominous-effect sound";

@@ -10,9 +10,9 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.jspecify.annotations.Nullable;
 
 public class BlockEntityType<T extends BlockEntity> {
-   private final BlockEntityType.BlockEntitySupplier<? extends T> factory;
-   private final Set<Block> validBlocks;
-   private final Holder.Reference<BlockEntityType<?>> builtInRegistryHolder = BuiltInRegistries.BLOCK_ENTITY_TYPE.createIntrusiveHolder(this);
+   private BlockEntityType.BlockEntitySupplier<? extends T> factory;
+   private Set<Block> validBlocks;
+   private Holder.Reference<BlockEntityType<?>> builtInRegistryHolder = BuiltInRegistries.BLOCK_ENTITY_TYPE.createIntrusiveHolder(this);
 
    public BlockEntityType(final BlockEntityType.BlockEntitySupplier<? extends T> factory, final Set<Block> validBlocks) {
       this.factory = factory;

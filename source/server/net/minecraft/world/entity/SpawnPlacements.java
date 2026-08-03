@@ -2,6 +2,7 @@ package net.minecraft.world.entity;
 
 import com.google.common.collect.Maps;
 import java.util.Map;
+import net.minecraft.allcraft.AllcraftRegistries;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.util.RandomSource;
@@ -50,12 +51,23 @@ import org.jspecify.annotations.Nullable;
 public class SpawnPlacements {
    private static final Map<EntityType<?>, SpawnPlacements.Data> DATA_BY_TYPE = Maps.newHashMap();
 
-   private static <T extends Mob> void register(
+   public static synchronized <T extends Mob> void register(
       final EntityType<T> type, final SpawnPlacementType placementType, final Heightmap.Types heightmap, final SpawnPlacements.SpawnPredicate<T> spawnPredicate
    ) {
       SpawnPlacements.Data previous = DATA_BY_TYPE.put(type, new SpawnPlacements.Data(heightmap, placementType, spawnPredicate));
-      if (previous != null) {
+      if (previous != null && !AllcraftRegistries.mutationAllowed()) {
          throw new IllegalStateException("Duplicate registration for type " + BuiltInRegistries.ENTITY_TYPE.getKey(type));
+      }
+      if (AllcraftRegistries.mutationAllowed()) {
+         AllcraftRegistries.recordUndo("restore spawn placement for " + BuiltInRegistries.ENTITY_TYPE.getKey(type), () -> {
+            synchronized (SpawnPlacements.class) {
+               if (previous == null) {
+                  DATA_BY_TYPE.remove(type);
+               } else {
+                  DATA_BY_TYPE.put(type, previous);
+               }
+            }
+         });
       }
    }
 
@@ -81,7 +93,7 @@ public class SpawnPlacements {
       }
 
       SpawnPlacements.Data data = DATA_BY_TYPE.get(type);
-      return data == null || data.predicate.test(type, level, spawnReason, pos, random);
+      return data == null || ((SpawnPlacements.SpawnPredicate<T>)data.predicate).test(type, level, spawnReason, pos, random);
    }
 
    static {

@@ -59,9 +59,12 @@ public final class AllcraftRevisionBuilder {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
     private static final int SNAPSHOT_FORMAT = 1;
     private static final int ARTIFACT_FORMAT = 2;
-    private static final String CACHE_FORMAT = "allcraft-general-compiler-v1";
+    private static final String CACHE_FORMAT = "allcraft-general-compiler-v2";
     private static final String SNAPSHOT = "revisions/current-source.json";
     private static final Pattern PACKAGE = Pattern.compile("(?m)^\\s*package\\s+([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\s*;");
+    private static final Pattern WILDCARD_IMPORT = Pattern.compile(
+        "(?m)^\\s*import\\s+(?:static\\s+)?([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\.\\*\\s*;"
+    );
     private static final Pattern TOP_LEVEL = Pattern.compile(
         "(?m)^(?:\\s*(?:public|protected|private|abstract|final|sealed|non-sealed|static|strictfp)\\s+)*(?:class|interface|enum|record|@interface)\\s+([A-Za-z_$][\\w$]*)"
     );
@@ -388,44 +391,46 @@ public final class AllcraftRevisionBuilder {
         for (String path : changed) {
             FileState state = current.files.get(path);
             if (state != null) {
-                affectedNames.addAll(typeNames(path, state, sourceRoot.resolve(path)));
+                addAffectedTypeNames(affectedNames, path, state, sourceRoot.resolve(path));
             }
         }
         for (String path : deleted) {
             FileState state = previous.files.get(path);
             if (state != null) {
                 affectedNames.addAll(state.classNames);
-                String simple = simpleSourceName(path);
-                if (simple != null) {
-                    affectedNames.add(simple);
+                String topLevel = sourceClassName(path, state);
+                if (topLevel != null) {
+                    affectedNames.add(topLevel);
                 }
             }
         }
-        Map<String, String> sources = new LinkedHashMap<>();
+
+        Map<String, SourceReferences> sources = new LinkedHashMap<>();
         for (Map.Entry<String, FileState> entry : current.files.entrySet()) {
             if (entry.getValue().kind.equals("java") && entry.getValue().appliesTo(side)) {
-                sources.put(entry.getKey(), Files.readString(sourceRoot.resolve(entry.getKey()), StandardCharsets.UTF_8));
+                String code = stripCommentsAndLiterals(Files.readString(sourceRoot.resolve(entry.getKey()), StandardCharsets.UTF_8));
+                Matcher packageMatcher = PACKAGE.matcher(code);
+                String packageName = packageMatcher.find() ? packageMatcher.group(1) : "";
+                Set<String> wildcardImports = new LinkedHashSet<>();
+                Matcher importMatcher = WILDCARD_IMPORT.matcher(code);
+                while (importMatcher.find()) {
+                    wildcardImports.add(importMatcher.group(1));
+                }
+                sources.put(entry.getKey(), new SourceReferences(code, packageName, Set.copyOf(wildcardImports)));
             }
         }
+
         boolean grew;
         do {
             grew = false;
-            Set<String> tokens = new LinkedHashSet<>();
-            for (String value : affectedNames) {
-                tokens.add(value);
-                int separator = value.lastIndexOf('.');
-                if (separator >= 0) {
-                    tokens.add(value.substring(separator + 1));
-                }
-            }
-            for (Map.Entry<String, String> candidate : sources.entrySet()) {
-                if (selected.contains(candidate.getKey()) || !mentionsAny(candidate.getValue(), tokens)) {
+            for (Map.Entry<String, SourceReferences> candidate : sources.entrySet()) {
+                if (selected.contains(candidate.getKey()) || !referencesAny(candidate.getValue(), affectedNames)) {
                     continue;
                 }
                 selected.add(candidate.getKey());
                 FileState state = current.files.get(candidate.getKey());
                 int before = affectedNames.size();
-                affectedNames.addAll(typeNames(candidate.getKey(), state, sourceRoot.resolve(candidate.getKey())));
+                addAffectedTypeNames(affectedNames, candidate.getKey(), state, sourceRoot.resolve(candidate.getKey()));
                 grew |= affectedNames.size() != before;
             }
         } while (grew);
@@ -433,16 +438,118 @@ public final class AllcraftRevisionBuilder {
         return selected;
     }
 
-    private static boolean mentionsAny(String source, Set<String> tokens) {
-        for (String token : tokens) {
-            if (token == null || token.isBlank()) {
+    private static void addAffectedTypeNames(Set<String> target, String path, FileState state, Path file) throws IOException {
+        target.addAll(state.classNames);
+        String topLevel = sourceClassName(path, state);
+        if (topLevel != null) {
+            target.add(topLevel);
+        }
+        typeNames(path, state, file).stream().filter(name -> name.indexOf('.') >= 0).forEach(target::add);
+    }
+
+    private static boolean referencesAny(SourceReferences source, Set<String> affectedNames) {
+        for (String affectedName : affectedNames) {
+            if (affectedName == null || affectedName.isBlank()) {
                 continue;
             }
-            if (source.contains(token) && Pattern.compile("(?<![A-Za-z0-9_$])" + Pattern.quote(token) + "(?![A-Za-z0-9_$])").matcher(source).find()) {
+            String dotted = affectedName.replace('$', '.');
+            if (mentionsToken(source.code, dotted)) {
+                return true;
+            }
+            String outer = affectedName;
+            int nested = outer.indexOf('$');
+            if (nested >= 0) {
+                outer = outer.substring(0, nested);
+            }
+            int separator = outer.lastIndexOf('.');
+            String packageName = separator < 0 ? "" : outer.substring(0, separator);
+            String simpleName = separator < 0 ? outer : outer.substring(separator + 1);
+            if (
+                (source.packageName.equals(packageName) || packageName.equals("java.lang") || source.wildcardImports.contains(packageName))
+                    && mentionsToken(source.code, simpleName)
+            ) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static boolean mentionsToken(String source, String token) {
+        return source.contains(token)
+            && Pattern.compile("(?<![A-Za-z0-9_$])" + Pattern.quote(token) + "(?![A-Za-z0-9_$])").matcher(source).find();
+    }
+
+    /** Removes comments and literals so generated class names in test strings are not mistaken for Java dependencies. */
+    private static String stripCommentsAndLiterals(String source) {
+        StringBuilder result = new StringBuilder(source.length());
+        int state = 0; // 0 code, 1 line comment, 2 block comment, 3 string, 4 character, 5 text block
+        boolean escaped = false;
+        for (int index = 0; index < source.length(); index++) {
+            char current = source.charAt(index);
+            char next = index + 1 < source.length() ? source.charAt(index + 1) : '\0';
+            char nextTwo = index + 2 < source.length() ? source.charAt(index + 2) : '\0';
+            if (state == 0) {
+                if (current == '/' && next == '/') {
+                    result.append("  ");
+                    index++;
+                    state = 1;
+                } else if (current == '/' && next == '*') {
+                    result.append("  ");
+                    index++;
+                    state = 2;
+                } else if (current == '"' && next == '"' && nextTwo == '"') {
+                    result.append("   ");
+                    index += 2;
+                    state = 5;
+                } else if (current == '"') {
+                    result.append(' ');
+                    state = 3;
+                    escaped = false;
+                } else if (current == '\'') {
+                    result.append(' ');
+                    state = 4;
+                    escaped = false;
+                } else {
+                    result.append(current);
+                }
+            } else if (state == 1) {
+                if (current == '\n' || current == '\r') {
+                    result.append(current);
+                    state = 0;
+                } else {
+                    result.append(' ');
+                }
+            } else if (state == 2) {
+                if (current == '*' && next == '/') {
+                    result.append("  ");
+                    index++;
+                    state = 0;
+                } else {
+                    result.append(current == '\n' || current == '\r' ? current : ' ');
+                }
+            } else if (state == 5) {
+                if (current == '"' && next == '"' && nextTwo == '"') {
+                    result.append("   ");
+                    index += 2;
+                    state = 0;
+                } else {
+                    result.append(current == '\n' || current == '\r' ? current : ' ');
+                }
+            } else {
+                result.append(current == '\n' || current == '\r' ? current : ' ');
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if ((state == 3 && current == '"') || (state == 4 && current == '\'')) {
+                    state = 0;
+                }
+            }
+        }
+        return result.toString();
+    }
+
+    private record SourceReferences(String code, String packageName, Set<String> wildcardImports) {
     }
 
     private static Compilation compile(
@@ -465,8 +572,10 @@ public final class AllcraftRevisionBuilder {
         Files.createDirectories(cacheRoot);
         Path temporary = cacheRoot.resolve("." + key + "." + UUID.randomUUID() + ".tmp");
         Path temporaryOutput = temporary.resolve("classes");
+        Path emptySourcePath = temporary.resolve("sourcepath");
         Path compilerLog = temporary.resolve("javac.log");
         Files.createDirectories(temporaryOutput);
+        Files.createDirectories(emptySourcePath);
         List<String> command = new ArrayList<>();
         command.add(configuredJavac().toString());
         command.add("-J-Xms32m");
@@ -474,8 +583,11 @@ public final class AllcraftRevisionBuilder {
         command.add("-J-XX:ActiveProcessorCount=4");
         command.add("-classpath");
         command.add(classPath);
+        // Compile only the dependency closure selected above. Letting javac search the
+        // decompiled source tree causes it to pull unrelated vanilla sources into an
+        // incremental build instead of resolving unchanged classes from the base JAR.
         command.add("-sourcepath");
-        command.add(sourcePath(side, sourceRoot));
+        command.add(emptySourcePath.toString());
         command.add("-d");
         command.add(temporaryOutput.toString());
         command.add("-encoding");
@@ -485,6 +597,7 @@ public final class AllcraftRevisionBuilder {
         command.add("-proc:none");
         command.add("-implicit:none");
         sourceFiles.forEach(path -> command.add(path.toString()));
+        LOGGER.info("Compiling Allcraft {} revision from {} explicit source file(s)", side.id, sourceFiles.size());
         Process process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(compilerLog.toFile()).start();
         boolean finished;
         try {
@@ -533,6 +646,10 @@ public final class AllcraftRevisionBuilder {
             }
         }
         values.add(System.getProperty("java.class.path"));
+        String compileOnly = System.getProperty("allcraft.compileClasspath", "");
+        if (!compileOnly.isBlank()) {
+            values.add(compileOnly);
+        }
         return String.join(File.pathSeparator, values);
     }
 

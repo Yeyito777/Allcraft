@@ -86,19 +86,19 @@ public abstract class BlockBehaviour implements FeatureElement {
    protected static final Direction[] UPDATE_SHAPE_ORDER = new Direction[]{
       Direction.WEST, Direction.EAST, Direction.NORTH, Direction.SOUTH, Direction.DOWN, Direction.UP
    };
-   protected final boolean hasCollision;
-   protected final float explosionResistance;
-   protected final boolean isRandomlyTicking;
-   protected final SoundType soundType;
-   protected final float friction;
-   protected final float speedFactor;
-   protected final float jumpFactor;
-   protected final float bounceRestitution;
-   protected final boolean dynamicShape;
-   protected final FeatureFlagSet requiredFeatures;
-   protected final BlockBehaviour.Properties properties;
-   protected final Optional<ResourceKey<LootTable>> drops;
-   protected final String descriptionId;
+   protected boolean hasCollision;
+   protected float explosionResistance;
+   protected boolean isRandomlyTicking;
+   protected SoundType soundType;
+   protected float friction;
+   protected float speedFactor;
+   protected float jumpFactor;
+   protected float bounceRestitution;
+   protected boolean dynamicShape;
+   protected FeatureFlagSet requiredFeatures;
+   protected BlockBehaviour.Properties properties;
+   protected Optional<ResourceKey<LootTable>> drops;
+   protected String descriptionId;
 
    public BlockBehaviour(final BlockBehaviour.Properties properties) {
       this.hasCollision = properties.hasCollision;

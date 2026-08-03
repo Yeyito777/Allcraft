@@ -38,9 +38,9 @@ public interface Registry<T> extends IdMap<T>, Keyable, HolderLookup.RegistryLoo
       Codec<Holder.Reference<T>> referenceCodec = Identifier.CODEC
          .comapFlatMap(
             name -> this.get(name)
-               .<DataResult>map(DataResult::success)
+               .<DataResult<Holder.Reference<T>>>map(DataResult::success)
                .orElseGet(() -> DataResult.error(() -> "Unknown registry key in " + this.key() + ": " + name)),
-            holder -> holder.key().identifier()
+            (Holder.Reference<T> holder) -> holder.key().identifier()
          );
       return ExtraCodecs.overrideLifecycle(
          referenceCodec, e -> this.registrationInfo(e.key()).map(RegistrationInfo::lifecycle).orElse(Lifecycle.experimental())
@@ -114,8 +114,8 @@ public interface Registry<T> extends IdMap<T>, Keyable, HolderLookup.RegistryLoo
    }
 
    static <V, T extends V> T register(final Registry<V> registry, final ResourceKey<V> key, final T value) {
-      ((WritableRegistry)registry).register(key, (V)value, RegistrationInfo.BUILT_IN);
-      return value;
+      Holder.Reference<V> holder = ((WritableRegistry<V>)registry).register(key, value, RegistrationInfo.BUILT_IN);
+      return holder.isBound() ? (T)holder.value() : value;
    }
 
    static <R, T extends R> Holder.Reference<T> registerForHolder(final Registry<R> registry, final ResourceKey<R> key, final T value) {
