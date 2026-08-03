@@ -13,6 +13,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import net.minecraft.SharedConstants;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Options;
@@ -31,6 +34,7 @@ import net.minecraft.server.packs.resources.SimplePreparableReloadListener;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.GsonHelper;
 import net.minecraft.util.RandomSource;
+import net.minecraft.util.profiling.InactiveProfiler;
 import net.minecraft.util.profiling.ProfilerFiller;
 import net.minecraft.util.profiling.Zone;
 import net.minecraft.util.valueproviders.ConstantFloat;
@@ -144,6 +148,34 @@ public class SoundManager extends SimplePreparableReloadListener<SoundManager.Pr
 
     public Collection<Identifier> getAvailableSounds() {
         return this.registry.keySet();
+    }
+
+    /**
+     * Rebinds sound resources to the new pack stack without restarting OpenAL. Parsing, when
+     * sounds.json changed, happens off-thread; only the map swap and targeted cache invalidation
+     * happen on the game thread.
+     */
+    public CompletableFuture<Integer> allcraftReload(
+        ResourceManager manager,
+        Set<Identifier> changedSoundFiles,
+        boolean definitionsChanged,
+        Executor taskExecutor,
+        Executor reloadExecutor
+    ) {
+        if (definitionsChanged) {
+            return CompletableFuture.supplyAsync(() -> this.prepare(manager, InactiveProfiler.INSTANCE), taskExecutor).thenApplyAsync(preparations -> {
+                preparations.apply(this.registry, this.soundCache, this.soundEngine);
+                this.soundEngine.allcraftInvalidateBuffers(changedSoundFiles);
+                this.soundEngine.allcraftFlushPreloads();
+                return changedSoundFiles.size();
+            }, reloadExecutor);
+        }
+        return CompletableFuture.supplyAsync(() -> Sound.SOUND_LISTER.listMatchingResources(manager), taskExecutor).thenApplyAsync(resources -> {
+            this.soundCache.clear();
+            this.soundCache.putAll(resources);
+            this.soundEngine.allcraftInvalidateBuffers(changedSoundFiles);
+            return changedSoundFiles.size();
+        }, reloadExecutor);
     }
 
     public void queueTickingSound(TickableSoundInstance instance) {

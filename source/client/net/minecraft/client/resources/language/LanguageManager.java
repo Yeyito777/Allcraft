@@ -8,6 +8,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 import net.minecraft.client.resources.metadata.language.LanguageMetadataSection;
@@ -50,21 +52,35 @@ public class LanguageManager implements ResourceManagerReloadListener {
 
     @Override
     public void onResourceManagerReload(ResourceManager resourceManager) {
-        this.languages = extractLanguages(resourceManager.listPacks());
+        this.apply(this.prepare(resourceManager));
+    }
+
+    /** Parses language packs off-thread and atomically publishes the new language on the game thread. */
+    public CompletableFuture<Void> allcraftReload(ResourceManager resourceManager, Executor taskExecutor, Executor reloadExecutor) {
+        return CompletableFuture.supplyAsync(() -> this.prepare(resourceManager), taskExecutor)
+            .thenAcceptAsync(this::apply, reloadExecutor);
+    }
+
+    private LanguageManager.PreparedLanguage prepare(ResourceManager resourceManager) {
+        Map<String, LanguageInfo> availableLanguages = extractLanguages(resourceManager.listPacks());
         List<String> languageStack = new ArrayList<>(2);
         boolean defaultRightToLeft = DEFAULT_LANGUAGE.bidirectional();
         languageStack.add("en_us");
         if (!this.currentCode.equals("en_us")) {
-            LanguageInfo currentLanguage = this.languages.get(this.currentCode);
+            LanguageInfo currentLanguage = availableLanguages.get(this.currentCode);
             if (currentLanguage != null) {
                 languageStack.add(this.currentCode);
                 defaultRightToLeft = currentLanguage.bidirectional();
             }
         }
-
         ClientLanguage locale = ClientLanguage.loadFrom(resourceManager, languageStack, defaultRightToLeft);
-        Language.inject(locale);
-        this.reloadCallback.accept(locale);
+        return new LanguageManager.PreparedLanguage(availableLanguages, locale);
+    }
+
+    private void apply(LanguageManager.PreparedLanguage prepared) {
+        this.languages = prepared.languages;
+        Language.inject(prepared.locale);
+        this.reloadCallback.accept(prepared.locale);
     }
 
     public void setSelected(String code) {
@@ -81,5 +97,8 @@ public class LanguageManager implements ResourceManagerReloadListener {
 
     public @Nullable LanguageInfo getLanguage(String code) {
         return this.languages.get(code);
+    }
+
+    private record PreparedLanguage(Map<String, LanguageInfo> languages, ClientLanguage locale) {
     }
 }

@@ -56,14 +56,19 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.MissingResourceException;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import net.minecraft.ChatFormatting;
 import net.minecraft.CrashReport;
@@ -264,6 +269,13 @@ import org.slf4j.Logger;
 public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements WindowEventHandler {
     private static Minecraft instance;
     private static final Logger LOGGER = LogUtils.getLogger();
+    private static final AtomicInteger ALLCRAFT_RESOURCE_THREAD_ID = new AtomicInteger();
+    private static final ExecutorService ALLCRAFT_RESOURCE_EXECUTOR = Executors.newFixedThreadPool(2, runnable -> {
+        Thread thread = new Thread(runnable, "Allcraft-Resource-" + ALLCRAFT_RESOURCE_THREAD_ID.incrementAndGet());
+        thread.setDaemon(true);
+        thread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 2));
+        return thread;
+    });
     private static final int MAX_TICKS_PER_UPDATE = 10;
     public static final Identifier DEFAULT_FONT = Identifier.withDefaultNamespace("default");
     private static final Identifier REGIONAL_COMPLIANCIES = Identifier.withDefaultNamespace("regional_compliancies.json");
@@ -306,6 +318,8 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
     private final boolean allowsMultiplayer;
     private final boolean allowsChat;
     private final ReloadableResourceManager resourceManager;
+    private List<Path> allcraftArtifactOverlays = List.of();
+    private Set<Identifier> allcraftActiveResourceIds = Set.of();
     private final VanillaPackResources vanillaPackResources;
     private final DownloadedPackSource downloadedPackSource;
     private final PackRepository resourcePackRepository;
@@ -560,7 +574,7 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
         this.options.loadSelectedResourcePacks(this.resourcePackRepository);
         this.languageManager = new LanguageManager(this.options.languageCode, var1 -> {
             if (this.player != null) {
-                this.player.connection.updateSearchTrees();
+                this.player.connection.allcraftUpdateSearchTrees(ALLCRAFT_RESOURCE_EXECUTOR);
             }
         });
         this.resourceManager.registerReloadListener(this.languageManager);
@@ -1018,17 +1032,106 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
         return this.reloadResourcePacks(false, null);
     }
 
-    /**
-     * Reloads the selected resource packs plus ordered Allcraft artifact overlays without
-     * installing Minecraft's blocking loading overlay. Preparation stays on the resource
-     * worker pool and the normal listeners perform their GPU/audio swaps on the game thread.
-     */
-    public CompletableFuture<Void> allcraftReloadResources(List<Path> artifactOverlays) {
-        this.resourcePackRepository.reload();
+    /** Installs an Allcraft overlay stack and updates only consumers affected by this revision. */
+    public CompletableFuture<Void> allcraftReloadResources(
+        List<Path> artifactOverlays, Set<Identifier> changedResources, Set<Identifier> deletedResources
+    ) {
+        long startedAt = System.nanoTime();
+        List<Path> normalizedOverlays = artifactOverlays.stream().map(path -> path.toAbsolutePath().normalize()).toList();
+        boolean incrementalAppend = normalizedOverlays.size() >= this.allcraftArtifactOverlays.size()
+            && normalizedOverlays.subList(0, this.allcraftArtifactOverlays.size()).equals(this.allcraftArtifactOverlays);
+        Set<Identifier> touched = new HashSet<>(changedResources);
+        touched.addAll(deletedResources);
+        Set<Identifier> nextActiveResources = incrementalAppend ? new HashSet<>(this.allcraftActiveResourceIds) : new HashSet<>();
+        if (!incrementalAppend) {
+            // A different world (or revision reset) must also restore resources that existed only
+            // in the previous overlay stack back to their selected-pack definitions.
+            touched.addAll(this.allcraftActiveResourceIds);
+        }
+        nextActiveResources.addAll(changedResources);
+        nextActiveResources.addAll(deletedResources);
+        this.allcraftArtifactOverlays = normalizedOverlays;
+        this.allcraftActiveResourceIds = Set.copyOf(nextActiveResources);
+
         List<PackResources> packs = new ArrayList<>(this.resourcePackRepository.openAllSelected());
+        this.allcraftAppendOverlayPacks(packs);
+        this.resourceManager.allcraftReplacePacks(packs);
+
+        Set<Identifier> textures = new HashSet<>();
+        Set<Identifier> soundFiles = new HashSet<>();
+        boolean languageChanged = false;
+        boolean soundDefinitionsChanged = false;
+        boolean modelsChanged = false;
+        boolean requiresFullReload = false;
+        for (Identifier resource : touched) {
+            String path = resource.getPath();
+            if (path.startsWith("textures/") && (path.endsWith(".png") || path.endsWith(".png.mcmeta"))) {
+                textures.add(
+                    path.endsWith(".mcmeta")
+                        ? Identifier.fromNamespaceAndPath(resource.getNamespace(), path.substring(0, path.length() - ".mcmeta".length()))
+                        : resource
+                );
+            } else if (path.startsWith("lang/") && path.endsWith(".json")) {
+                languageChanged = true;
+            } else if (path.startsWith("sounds/") && path.endsWith(".ogg")) {
+                soundFiles.add(resource);
+            } else if (path.equals("sounds.json")) {
+                soundDefinitionsChanged = true;
+            } else if (path.startsWith("models/") || path.startsWith("blockstates/") || path.startsWith("items/")) {
+                modelsChanged = true;
+            } else {
+                requiresFullReload = true;
+            }
+        }
+
+        var background = ALLCRAFT_RESOURCE_EXECUTOR;
+        LOGGER.info(
+            "Allcraft incremental resource plan: {} texture(s), {} sound file(s), language={}, sound definitions={}, models={}, fullFallback={}",
+            textures.size(),
+            soundFiles.size(),
+            languageChanged,
+            soundDefinitionsChanged,
+            modelsChanged,
+            requiresFullReload
+        );
+        if (requiresFullReload) {
+            return this.allcraftFullResourceReload(background, startedAt, "unclassified resource dependency");
+        }
+
+        boolean finalLanguageChanged = languageChanged;
+        boolean finalSoundDefinitionsChanged = soundDefinitionsChanged;
+        boolean finalModelsChanged = modelsChanged;
+        return this.atlasManager.allcraftReloadExistingSprites(this.resourceManager, textures, background, this).thenCompose(atlasResult -> {
+            if (atlasResult.requiresRestitch()) {
+                return this.allcraftFullResourceReload(background, startedAt, "atlas layout changed");
+            }
+            List<CompletableFuture<?>> updates = new ArrayList<>();
+            updates.add(this.textureManager.allcraftReloadTextures(this.resourceManager, textures, background, this));
+            // Rebinding on every pack swap prevents cached Resource objects from retaining closed overlay JARs.
+            updates.add(this.soundManager.allcraftReload(this.resourceManager, soundFiles, finalSoundDefinitionsChanged, background, this));
+            if (finalLanguageChanged) {
+                updates.add(this.languageManager.allcraftReload(this.resourceManager, background, this));
+            }
+            if (finalModelsChanged) {
+                ReloadInstance modelReload = this.resourceManager.allcraftCreateReload(
+                    background,
+                    this,
+                    RESOURCE_RELOAD_INITIAL_TASK,
+                    List.of(this.atlasManager.allcraftSnapshotProvider(), this.modelManager)
+                );
+                updates.add(modelReload.done().thenRunAsync(this.levelExtractor::allcraftScheduleSeamlessSectionRebuilds, this));
+            }
+            return CompletableFuture.allOf(updates.toArray(CompletableFuture[]::new)).thenRunAsync(() -> LOGGER.info(
+                "Allcraft incremental resources applied in {} ms ({} in-place atlas sprite(s)); no global atlas upload, audio restart, or chunk reset",
+                (System.nanoTime() - startedAt) / 1_000_000L,
+                atlasResult.updatedSprites()
+            ), this);
+        });
+    }
+
+    private void allcraftAppendOverlayPacks(List<PackResources> packs) {
         int index = 0;
-        for (Path artifact : artifactOverlays) {
-            Path normalized = artifact.toAbsolutePath().normalize();
+        for (Path normalized : this.allcraftArtifactOverlays) {
             PackLocationInfo location = new PackLocationInfo(
                 "allcraft/" + index++ + "/" + normalized.getFileName(),
                 Component.literal("Allcraft world overlay"),
@@ -1037,10 +1140,15 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
             );
             packs.add(new FilePackResources.FileResourcesSupplier(normalized).openPrimary(location));
         }
+    }
 
-        ReloadInstance reload = this.resourceManager
-            .createReload(Util.backgroundExecutor().forName("allcraftResourceLoad"), this, RESOURCE_RELOAD_INITIAL_TASK, packs);
-        return reload.done().thenRunAsync(this.levelExtractor::allChanged, this);
+    private CompletableFuture<Void> allcraftFullResourceReload(java.util.concurrent.Executor background, long startedAt, String reason) {
+        LOGGER.warn("Allcraft resource change requires full-listener fallback: {}", reason);
+        ReloadInstance reload = this.resourceManager.allcraftCreateFullReload(background, this, RESOURCE_RELOAD_INITIAL_TASK);
+        return reload.done().thenRunAsync(() -> {
+            this.levelExtractor.allcraftScheduleSeamlessSectionRebuilds();
+            LOGGER.info("Allcraft full fallback completed in {} ms", (System.nanoTime() - startedAt) / 1_000_000L);
+        }, this);
     }
 
     private CompletableFuture<Void> reloadResourcePacks(boolean isRecovery, @Nullable GameLoadCookie loadCookie) {
@@ -1055,7 +1163,8 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
         }
 
         this.resourcePackRepository.reload();
-        List<PackResources> packs = this.resourcePackRepository.openAllSelected();
+        List<PackResources> packs = new ArrayList<>(this.resourcePackRepository.openAllSelected());
+        this.allcraftAppendOverlayPacks(packs);
         if (!isRecovery) {
             this.reloadStateTracker.startReload(ResourceLoadStateTracker.ReloadReason.MANUAL, packs);
         }

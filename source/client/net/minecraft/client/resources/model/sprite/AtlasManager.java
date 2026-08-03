@@ -8,22 +8,28 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import net.minecraft.client.renderer.Sheets;
 import net.minecraft.client.renderer.texture.MissingTextureAtlasSprite;
+import net.minecraft.client.renderer.texture.SpriteContents;
 import net.minecraft.client.renderer.texture.SpriteLoader;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.renderer.texture.TextureManager;
+import net.minecraft.client.renderer.texture.atlas.SpriteResourceLoader;
 import net.minecraft.client.resources.metadata.gui.GuiMetadataSection;
 import net.minecraft.data.AtlasIds;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.packs.metadata.MetadataSectionType;
 import net.minecraft.server.packs.resources.PreparableReloadListener;
+import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
+import net.minecraft.util.Unit;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.api.distmarker.OnlyIn;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 
 @OnlyIn(Dist.CLIENT)
@@ -77,6 +83,95 @@ public class AtlasManager implements AutoCloseable, PreparableReloadListener, Sp
 
     public void updateMaxMipLevel(int maxMipmapLevels) {
         this.maxMipmapLevels = maxMipmapLevels;
+    }
+
+    /**
+     * Reloads same-sized, static sprites directly into their existing GPU atlas rectangles.
+     * Existing baked models and chunk meshes keep valid UVs, so no chunk rebuild is needed.
+     */
+    public CompletableFuture<AtlasManager.HotReloadResult> allcraftReloadExistingSprites(
+        ResourceManager resourceManager, Set<Identifier> changedTextureResources, Executor taskExecutor, Executor reloadExecutor
+    ) {
+        List<CompletableFuture<AtlasManager.PendingHotSprite>> loads = new ArrayList<>();
+        this.spriteLookup.forEach((spriteId, existing) -> {
+            Identifier resourceId = Identifier.fromNamespaceAndPath(
+                spriteId.texture().getNamespace(), "textures/" + spriteId.texture().getPath() + ".png"
+            );
+            if (!changedTextureResources.contains(resourceId)) {
+                return;
+            }
+            AtlasManager.AtlasEntry atlasEntry = this.atlasByTexture.get(spriteId.atlasLocation());
+            if (atlasEntry == null) {
+                return;
+            }
+            loads.add(CompletableFuture.supplyAsync(() -> {
+                Resource resource = resourceManager.getResource(resourceId).orElse(null);
+                if (resource == null) {
+                    return new AtlasManager.PendingHotSprite(atlasEntry, existing, null);
+                }
+                try {
+                    SpriteContents contents = SpriteResourceLoader.create(atlasEntry.config.additionalMetadata).loadSprite(spriteId.texture(), resource);
+                    if (contents != null) {
+                        contents.increaseMipLevel(atlasEntry.atlas.maxMipLevel());
+                    }
+                    return new AtlasManager.PendingHotSprite(atlasEntry, existing, contents);
+                } catch (RuntimeException e) {
+                    throw new CompletionException(e);
+                }
+            }, taskExecutor));
+        });
+        if (loads.isEmpty()) {
+            return CompletableFuture.completedFuture(new AtlasManager.HotReloadResult(0, false));
+        }
+        return CompletableFuture.allOf(loads.toArray(CompletableFuture[]::new)).thenApplyAsync(unused -> {
+            List<AtlasManager.PendingHotSprite> prepared = loads.stream().map(CompletableFuture::join).toList();
+            boolean requiresRestitch = prepared.stream()
+                .anyMatch(value -> value.contents == null || !value.atlasEntry.atlas.allcraftCanReplace(value.existing, value.contents));
+            if (requiresRestitch) {
+                prepared.forEach(AtlasManager.PendingHotSprite::closeContents);
+                return new AtlasManager.HotReloadResult(0, true);
+            }
+            for (AtlasManager.PendingHotSprite value : prepared) {
+                try {
+                    value.atlasEntry.atlas.allcraftReplace(value.existing, value.contents);
+                } finally {
+                    value.closeContents();
+                }
+            }
+            return new AtlasManager.HotReloadResult(prepared.size(), false);
+        }, reloadExecutor);
+    }
+
+    /** Provides current atlas coordinates to a model-only rebake without restitching or uploading any atlas. */
+    public PreparableReloadListener allcraftSnapshotProvider() {
+        return new PreparableReloadListener() {
+            @Override
+            public void prepareSharedState(PreparableReloadListener.SharedState currentReload) {
+                Map<Identifier, CompletableFuture<SpriteLoader.Preparations>> snapshots = new HashMap<>();
+                AtlasManager.this.atlasById.forEach(
+                    (atlasId, entry) -> snapshots.put(atlasId, CompletableFuture.completedFuture(entry.atlas.allcraftSnapshot()))
+                );
+                currentReload.set(
+                    AtlasManager.PENDING_STITCH,
+                    new AtlasManager.PendingStitchResults(List.of(), snapshots, CompletableFuture.completedFuture(null))
+                );
+            }
+
+            @Override
+            public CompletableFuture<Void> reload(
+                PreparableReloadListener.SharedState currentReload,
+                Executor taskExecutor,
+                PreparableReloadListener.PreparationBarrier preparationBarrier,
+                Executor reloadExecutor
+            ) {
+                return preparationBarrier.wait(Unit.INSTANCE).thenApply(unused -> null);
+            }
+
+            @Override
+            public String getName() {
+                return "AllcraftAtlasSnapshot";
+            }
+        };
     }
 
     @Override
@@ -187,6 +282,17 @@ public class AtlasManager implements AutoCloseable, PreparableReloadListener, Sp
             SpriteLoader.Preparations preparations = this.preparations.join();
             this.entry.atlas.upload(preparations);
             preparations.regions().forEach((spriteId, spriteContents) -> result.put(new SpriteId(this.entry.config.textureId, spriteId), spriteContents));
+        }
+    }
+
+    public record HotReloadResult(int updatedSprites, boolean requiresRestitch) {
+    }
+
+    private record PendingHotSprite(AtlasManager.AtlasEntry atlasEntry, TextureAtlasSprite existing, @Nullable SpriteContents contents) {
+        private void closeContents() {
+            if (this.contents != null) {
+                this.contents.close();
+            }
         }
     }
 

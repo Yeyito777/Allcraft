@@ -152,9 +152,9 @@ public final class AllcraftPatchServer {
                     clientArtifacts
                 );
             }
-            if (!serverResourceArtifacts.isEmpty() || !clientResourceArtifacts.isEmpty()) {
-                PENDING_RESOURCE_RESTORES.put(server, new ResourceRestore(serverResourceArtifacts, clientResourceArtifacts));
-            }
+            // An empty resource set is meaningful: it clears overlays left by the previously
+            // opened world and restores selected-pack assets before this world begins ticking.
+            PENDING_RESOURCE_RESTORES.put(server, new ResourceRestore(serverResourceArtifacts, clientResourceArtifacts));
         } catch (Exception e) {
             throw new IllegalStateException("Failed to restore Allcraft runtime artifacts for " + worldRoot, e);
         }
@@ -806,7 +806,7 @@ public final class AllcraftPatchServer {
     }
 
     private static CompletableFuture<?> restoreIntegratedClientResources(List<Path> artifacts) {
-        if (artifacts.isEmpty() || !classExists("net.minecraft.client.Minecraft")) {
+        if (!classExists("net.minecraft.client.Minecraft")) {
             return CompletableFuture.completedFuture(null);
         }
         try {

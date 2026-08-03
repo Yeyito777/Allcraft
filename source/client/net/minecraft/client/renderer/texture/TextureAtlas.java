@@ -278,6 +278,86 @@ public class TextureAtlas extends AbstractTexture implements TickableTexture, Du
         }
     }
 
+    /** Snapshot used for model-only rebakes; all sprite coordinates remain valid. */
+    public SpriteLoader.Preparations allcraftSnapshot() {
+        return new SpriteLoader.Preparations(
+            this.width,
+            this.height,
+            this.maxMipLevel,
+            this.missingSprite(),
+            this.texturesByName,
+            java.util.concurrent.CompletableFuture.completedFuture(null)
+        );
+    }
+
+    public boolean allcraftCanReplace(TextureAtlasSprite existing, SpriteContents replacement) {
+        return this.texture != null
+            && this.texturesByName.get(replacement.name()) == existing
+            && !existing.isAnimated()
+            && !replacement.isAnimated()
+            && existing.contents().width() == replacement.width()
+            && existing.contents().height() == replacement.height();
+    }
+
+    /** Changes only one existing atlas rectangle, preserving baked UVs and every chunk mesh. */
+    public void allcraftReplace(TextureAtlasSprite existing, SpriteContents replacement) {
+        if (!this.allcraftCanReplace(existing, replacement)) {
+            throw new IllegalArgumentException("Sprite cannot be replaced in-place: " + replacement.name());
+        }
+        // Use the same blit path as a normal atlas upload. A direct image copy would update
+        // only the sprite body and leave stale atlas padding, producing colored grid lines at
+        // distance once filtering and mipmaps sample across sprite edges.
+        TextureAtlasSprite uploaded = new TextureAtlasSprite(
+            this.location,
+            replacement,
+            this.width,
+            this.height,
+            existing.getX(),
+            existing.getY(),
+            existing.allcraftPadding()
+        );
+        GpuDevice device = RenderSystem.getDevice();
+        int spriteUboSize = Mth.roundToward(SpriteContents.UBO_SIZE, device.getDeviceInfo().limits().minUniformOffsetAlignment());
+        int uboBlockSize = spriteUboSize * this.mipLevelCount;
+        ByteBuffer buffer = MemoryUtil.memAlloc(uboBlockSize);
+        uploaded.uploadSpriteUbo(buffer, 0, this.maxMipLevel, this.width, this.height, spriteUboSize);
+        GpuTexture scratchTexture = device.createTexture(
+            () -> replacement.name() + " Allcraft hot reload",
+            5,
+            GpuFormat.RGBA8_UNORM,
+            replacement.width(),
+            replacement.height(),
+            1,
+            this.mipLevelCount
+        );
+        GpuTextureView[] views = new GpuTextureView[this.mipLevelCount];
+        for (int level = 0; level <= this.maxMipLevel; level++) {
+            uploaded.uploadFirstFrame(scratchTexture, level);
+            views[level] = device.createTextureView(scratchTexture);
+        }
+        GpuSampler sampler = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST, true);
+        try (GpuBuffer ubo = device.createBuffer(() -> "AllcraftSpriteHotReload", 128, buffer)) {
+            for (int level = 0; level < this.mipLevelCount; level++) {
+                try (RenderPass renderPass = device.createCommandEncoder()
+                        .createRenderPass(() -> "Allcraft hot reload " + replacement.name(), this.mipViews[level], Optional.empty())) {
+                    RenderSystem.bindDefaultUniforms(renderPass);
+                    renderPass.setPipeline(RenderPipelines.ANIMATE_SPRITE_BLIT);
+                    renderPass.bindTexture("Sprite", views[level], sampler);
+                    renderPass.setUniform("SpriteAnimationInfo", ubo.slice(level * spriteUboSize, SpriteContents.UBO_SIZE));
+                    renderPass.draw(6, 1, 0, 0);
+                }
+            }
+        } finally {
+            for (GpuTextureView view : views) {
+                if (view != null) {
+                    view.close();
+                }
+            }
+            scratchTexture.close();
+            MemoryUtil.memFree(buffer);
+        }
+    }
+
     public TextureAtlasSprite missingSprite() {
         return Objects.requireNonNull(this.missingSprite, "Atlas not initialized");
     }
@@ -316,6 +396,10 @@ public class TextureAtlas extends AbstractTexture implements TickableTexture, Du
 
     public int maxSupportedTextureSize() {
         return this.maxSupportedTextureSize;
+    }
+
+    public int maxMipLevel() {
+        return this.maxMipLevel;
     }
 
     int getWidth() {

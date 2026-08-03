@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import javax.sound.sampled.AudioFormat;
@@ -54,6 +55,16 @@ public class SoundBufferLibrary {
     public void clear() {
         this.cache.values().forEach(future -> future.thenAccept(SoundBuffer::discardAlBuffer));
         this.cache.clear();
+    }
+
+    /** Invalidates only changed decoded buffers; the OpenAL device and unrelated sounds remain alive. */
+    public void allcraftInvalidate(Set<Identifier> locations) {
+        for (Identifier location : locations) {
+            CompletableFuture<SoundBuffer> removed = this.cache.remove(location);
+            if (removed != null) {
+                removed.thenAccept(SoundBuffer::discardAlBuffer);
+            }
+        }
     }
 
     public CompletableFuture<?> preload(Collection<Sound> sounds) {

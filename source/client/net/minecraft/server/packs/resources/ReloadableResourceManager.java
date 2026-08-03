@@ -41,9 +41,43 @@ public class ReloadableResourceManager implements AutoCloseable, ResourceManager
         Executor backgroundExecutor, Executor mainThreadExecutor, CompletableFuture<Unit> initialTask, List<PackResources> resourcePacks
     ) {
         LOGGER.info("Reloading ResourceManager: {}", LogUtils.defer(() -> resourcePacks.stream().map(PackResources::packId).collect(Collectors.joining(", "))));
-        this.resources.close();
-        this.resources = new MultiPackResourceManager(this.type, resourcePacks);
+        this.replacePacks(resourcePacks);
         return SimpleReloadInstance.create(this.resources, this.listeners, backgroundExecutor, mainThreadExecutor, initialTask, LOGGER.isDebugEnabled());
+    }
+
+    /** Replaces only the resource lookup stack; callers can then update affected consumers incrementally. */
+    public void allcraftReplacePacks(List<PackResources> resourcePacks) {
+        LOGGER.info(
+            "Updating ResourceManager packs: {}",
+            LogUtils.defer(() -> resourcePacks.stream().map(PackResources::packId).collect(Collectors.joining(", ")))
+        );
+        this.replacePacks(resourcePacks);
+    }
+
+    /** Runs a dependency-selected listener set against the already-installed resource stack. */
+    public ReloadInstance allcraftCreateReload(
+        Executor backgroundExecutor,
+        Executor mainThreadExecutor,
+        CompletableFuture<Unit> initialTask,
+        List<PreparableReloadListener> selectedListeners
+    ) {
+        return SimpleReloadInstance.create(
+            this.resources, selectedListeners, backgroundExecutor, mainThreadExecutor, initialTask, LOGGER.isDebugEnabled()
+        );
+    }
+
+    /** Full-listener fallback against the already-installed resource stack. */
+    public ReloadInstance allcraftCreateFullReload(
+        Executor backgroundExecutor, Executor mainThreadExecutor, CompletableFuture<Unit> initialTask
+    ) {
+        return this.allcraftCreateReload(backgroundExecutor, mainThreadExecutor, initialTask, this.listeners);
+    }
+
+    private void replacePacks(List<PackResources> resourcePacks) {
+        CloseableResourceManager replacement = new MultiPackResourceManager(this.type, resourcePacks);
+        CloseableResourceManager previous = this.resources;
+        this.resources = replacement;
+        previous.close();
     }
 
     @Override

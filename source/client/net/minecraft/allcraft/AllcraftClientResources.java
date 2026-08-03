@@ -18,9 +18,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.jar.JarEntry;
@@ -64,7 +66,9 @@ public final class AllcraftClientResources {
         long startedAt = System.nanoTime();
         boolean startedWithLoadingOverlay = minecraft.gui.overlay() instanceof LoadingOverlay;
 
-        return reloadOnGameThread(minecraft, paths).thenApply(unused -> {
+        Set<Identifier> changed = resourceIdentifiers(expectedResources.keySet(), "assets/");
+        Set<Identifier> deleted = resourceIdentifiers(deletedResources, "assets/");
+        return reloadOnGameThread(minecraft, paths, changed, deleted).thenApply(unused -> {
             try {
                 if (startedWithLoadingOverlay || minecraft.gui.overlay() instanceof LoadingOverlay) {
                     throw new IOException("Allcraft resource activation displayed a loading overlay");
@@ -92,20 +96,32 @@ public final class AllcraftClientResources {
     public static CompletableFuture<ApplyResult> restoreIntegrated(Minecraft minecraft, List<Path> artifacts) {
         List<Path> overlays = artifacts.stream().filter(Files::isRegularFile).filter(AllcraftClientResources::hasClientContentUnchecked).toList();
         if (overlays.isEmpty()) {
-            return CompletableFuture.completedFuture(ApplyResult.empty());
+            return reloadOnGameThread(minecraft, List.of(), Set.of(), Set.of()).thenApply(unused -> ApplyResult.empty());
         }
 
         long startedAt = System.nanoTime();
-        return reloadOnGameThread(minecraft, overlays)
+        Set<Identifier> changed = new HashSet<>();
+        Set<Identifier> deleted = new HashSet<>();
+        try {
+            for (Path artifact : overlays) {
+                changed.addAll(resourceIdentifiers(readResources(artifact, "assets/").keySet(), "assets/"));
+                deleted.addAll(resourceIdentifiers(deletedResources(artifact, "assets/"), "assets/"));
+            }
+        } catch (IOException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+        return reloadOnGameThread(minecraft, overlays, changed, deleted)
             .thenApply(unused -> new ApplyResult(true, countResourcesUnchecked(overlays, "assets/"), 0, elapsedMillis(startedAt), true));
     }
 
-    private static CompletableFuture<Void> reloadOnGameThread(Minecraft minecraft, List<Path> overlays) {
+    private static CompletableFuture<Void> reloadOnGameThread(
+        Minecraft minecraft, List<Path> overlays, Set<Identifier> changed, Set<Identifier> deleted
+    ) {
         if (minecraft.isSameThread()) {
-            return minecraft.allcraftReloadResources(overlays);
+            return minecraft.allcraftReloadResources(overlays, changed, deleted);
         }
 
-        return minecraft.<CompletableFuture<Void>>submit(() -> minecraft.allcraftReloadResources(overlays)).thenCompose(future -> future);
+        return minecraft.<CompletableFuture<Void>>submit(() -> minecraft.allcraftReloadResources(overlays, changed, deleted)).thenCompose(future -> future);
     }
 
     private static void verifyResources(Minecraft minecraft, Map<String, byte[]> expected) throws IOException {
@@ -143,6 +159,14 @@ public final class AllcraftClientResources {
             throw new IOException("Invalid Allcraft resource identifier " + entry);
         }
         return id;
+    }
+
+    private static Set<Identifier> resourceIdentifiers(Iterable<String> entries, String prefix) throws IOException {
+        Set<Identifier> result = new HashSet<>();
+        for (String entry : entries) {
+            result.add(identifierFromEntry(entry, prefix));
+        }
+        return Set.copyOf(result);
     }
 
     private static Map<String, byte[]> readResources(Path artifact, String prefix) throws IOException {

@@ -33,6 +33,7 @@ public class CompiledSectionMesh implements SectionMesh {
     private final Map<ChunkSectionLayer, SectionMesh.SectionDraw> draws = new EnumMap<>(ChunkSectionLayer.class);
     private final Map<ChunkSectionLayer, AtomicBoolean> vertexBufferUploaded = Util.makeEnumMap(ChunkSectionLayer.class, layer -> new AtomicBoolean());
     private final Map<ChunkSectionLayer, AtomicBoolean> indexBufferUploaded = Util.makeEnumMap(ChunkSectionLayer.class, layer -> new AtomicBoolean());
+    private long allcraftModelGeneration;
 
     public CompiledSectionMesh(TranslucencyPointOfView translucencyPointOfView, SectionCompiler.Results results) {
         this.translucencyPointOfView = translucencyPointOfView;
@@ -48,6 +49,14 @@ public class CompiledSectionMesh implements SectionMesh {
 
     public void setTranslucencyPointOfView(TranslucencyPointOfView translucencyPointOfView) {
         this.translucencyPointOfView = translucencyPointOfView;
+    }
+
+    public void allcraftSetModelGeneration(long generation) {
+        this.allcraftModelGeneration = generation;
+    }
+
+    public long allcraftModelGeneration() {
+        return this.allcraftModelGeneration;
     }
 
     @Override

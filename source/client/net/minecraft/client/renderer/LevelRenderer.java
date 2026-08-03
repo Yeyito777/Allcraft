@@ -831,6 +831,22 @@ public class LevelRenderer implements AutoCloseable {
         this.viewArea.repositionCamera(cameraSectionPos);
     }
 
+    /** Updates the model generation used by future section builds without discarding existing meshes. */
+    public long allcraftUpdateSectionCompiler(Options options, BlockColors blockColors) {
+        if (this.sectionRenderDispatcher != null) {
+            return this.sectionRenderDispatcher.allcraftSetCompiler(
+                new SectionCompiler(
+                    options.ambientOcclusion().get(),
+                    options.cutoutLeaves().get(),
+                    this.modelManager.getBlockStateModelSet(),
+                    this.modelManager.getFluidStateModelSet(),
+                    blockColors
+                )
+            );
+        }
+        return 0L;
+    }
+
     private @Nullable PostChain getTransparencyChain() {
         return !this.gameRenderer.gameRenderState().useShaderTransparency()
             ? null

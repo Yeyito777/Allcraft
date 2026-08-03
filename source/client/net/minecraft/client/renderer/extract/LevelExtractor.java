@@ -3,10 +3,15 @@ package net.minecraft.client.renderer.extract;
 import com.mojang.blaze3d.vertex.PoseStack;
 import it.unimi.dsi.fastutil.longs.LongCollection;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap.Entry;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.SortedSet;
+import java.util.Set;
 import net.minecraft.SharedConstants;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -85,6 +90,9 @@ public class LevelExtractor implements ResourceManagerReloadListener {
     private boolean shouldResetLevelRenderData;
     private boolean shouldResetChunkLayerSampler;
     private boolean shouldResetSkyRenderer;
+    private final ArrayDeque<Long> allcraftPendingSectionRebuilds = new ArrayDeque<>();
+    private final Set<Long> allcraftPendingSectionNodes = new HashSet<>();
+    private long allcraftTargetModelGeneration;
 
     public LevelExtractor(Minecraft minecraft, LevelRenderState levelRenderState, LevelRenderer levelRenderer) {
         this.minecraft = minecraft;
@@ -100,6 +108,8 @@ public class LevelExtractor implements ResourceManagerReloadListener {
         Vec3 cameraPos = camera.position();
         if (this.sectionUpdateTracker != null) {
             this.sectionUpdateTracker.repositionCamera(SectionPos.of(cameraPos));
+            this.allcraftQueueStaleVisibleSections();
+            this.allcraftProcessSectionRebuilds();
         }
 
         if (this.shouldResetLevelRenderData) {
@@ -392,6 +402,8 @@ public class LevelExtractor implements ResourceManagerReloadListener {
 
     public void setLevel(@Nullable ClientLevel level) {
         this.level = level;
+        this.allcraftPendingSectionRebuilds.clear();
+        this.allcraftPendingSectionNodes.clear();
         if (level != null) {
             this.allChanged();
         } else {
@@ -405,6 +417,8 @@ public class LevelExtractor implements ResourceManagerReloadListener {
 
     public void allChanged() {
         if (this.level != null) {
+            this.allcraftPendingSectionRebuilds.clear();
+            this.allcraftPendingSectionNodes.clear();
             this.level.clearTintCaches();
             Options options = this.minecraft.options;
             this.lastViewDistance = options.getEffectiveRenderDistance();
@@ -413,6 +427,76 @@ public class LevelExtractor implements ResourceManagerReloadListener {
             SectionPos cameraSectionPos = SectionPos.of(camera.position());
             this.sectionUpdateTracker.repositionCamera(cameraSectionPos);
             this.shouldInvalidateCompiledGeometry = true;
+        }
+    }
+
+    /**
+     * Keeps old meshes visible while replacements compile asynchronously. A small bounded batch
+     * is admitted per frame, and admission pauses while the vanilla compile queue is busy.
+     */
+    public void allcraftScheduleSeamlessSectionRebuilds() {
+        this.allcraftPendingSectionRebuilds.clear();
+        this.allcraftPendingSectionNodes.clear();
+        // SectionCompiler intentionally snapshots the model sets. Refresh that snapshot before
+        // scheduling replacement meshes; otherwise items/particles use the new model while
+        // placed blocks are silently rebuilt from the previous model generation.
+        this.allcraftTargetModelGeneration = this.levelRenderer.allcraftUpdateSectionCompiler(
+            this.minecraft.options, this.minecraft.getBlockColors()
+        );
+        ViewArea viewArea = this.levelRenderer.viewArea();
+        if (this.level == null || this.sectionUpdateTracker == null || viewArea == null) {
+            return;
+        }
+        SectionPos camera = SectionPos.of(this.minecraft.gameRenderer.mainCamera().position());
+        List<Long> sections = new ArrayList<>();
+        for (SectionRenderDispatcher.RenderSection section : viewArea.allcraftSections()) {
+            if (section.getSectionMesh() != CompiledSectionMesh.UNCOMPILED) {
+                sections.add(section.getSectionNode());
+            }
+        }
+        sections.sort(Comparator.comparingLong(node -> {
+            long dx = SectionPos.x(node) - camera.x();
+            long dy = SectionPos.y(node) - camera.y();
+            long dz = SectionPos.z(node) - camera.z();
+            return dx * dx + dy * dy + dz * dz;
+        }));
+        for (long section : sections) {
+            if (this.allcraftPendingSectionNodes.add(section)) {
+                this.allcraftPendingSectionRebuilds.addLast(section);
+            }
+        }
+    }
+
+    private void allcraftQueueStaleVisibleSections() {
+        if (this.allcraftTargetModelGeneration == 0L) {
+            return;
+        }
+        for (SectionRenderDispatcher.RenderSection section : this.levelRenderer.visibleSections()) {
+            long node = section.getSectionNode();
+            if (section.allcraftNeedsModelGeneration(this.allcraftTargetModelGeneration) && this.allcraftPendingSectionNodes.add(node)) {
+                this.allcraftPendingSectionRebuilds.addFirst(node);
+            }
+        }
+    }
+
+    private void allcraftProcessSectionRebuilds() {
+        if (this.allcraftPendingSectionRebuilds.isEmpty() || this.sectionUpdateTracker == null) {
+            return;
+        }
+        SectionRenderDispatcher dispatcher = this.levelRenderer.sectionRenderDispatcher();
+        if (dispatcher != null && dispatcher.getCompileQueueSize() >= 8) {
+            return;
+        }
+        ViewArea viewArea = this.levelRenderer.viewArea();
+        int admitted = 0;
+        while (admitted < 8 && !this.allcraftPendingSectionRebuilds.isEmpty()) {
+            long section = this.allcraftPendingSectionRebuilds.removeFirst();
+            this.allcraftPendingSectionNodes.remove(section);
+            SectionRenderDispatcher.RenderSection renderSection = viewArea == null ? null : viewArea.allcraftGetRenderSection(section);
+            if (renderSection != null && renderSection.allcraftRequestModelGeneration(this.allcraftTargetModelGeneration)) {
+                this.sectionUpdateTracker.setDirty(SectionPos.x(section), SectionPos.y(section), SectionPos.z(section), false);
+                admitted++;
+            }
         }
     }
 

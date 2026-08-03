@@ -2853,6 +2853,10 @@ public class ClientPacketListener extends ClientCommonPacketListenerImpl impleme
         this.searchTrees.rebuildAfterLanguageChange();
     }
 
+    public void allcraftUpdateSearchTrees(java.util.concurrent.Executor executor) {
+        this.searchTrees.rebuildAfterLanguageChange(executor);
+    }
+
     public SessionSearchTrees searchTrees() {
         return this.searchTrees;
     }

@@ -4,6 +4,8 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.ClientRecipeBook;
@@ -36,16 +38,20 @@ public class SessionSearchTrees {
     private CompletableFuture<SearchTree<ItemStack>> creativeByNameSearch = CompletableFuture.completedFuture(SearchTree.empty());
     private CompletableFuture<SearchTree<ItemStack>> creativeByTagSearch = CompletableFuture.completedFuture(SearchTree.empty());
     private CompletableFuture<SearchTree<RecipeCollection>> recipeSearch = CompletableFuture.completedFuture(SearchTree.empty());
-    private final Map<SessionSearchTrees.Key, Runnable> reloaders = new IdentityHashMap<>();
+    private final Map<SessionSearchTrees.Key, Consumer<Executor>> reloaders = new IdentityHashMap<>();
 
-    private void register(SessionSearchTrees.Key location, Runnable updater) {
-        updater.run();
+    private void register(SessionSearchTrees.Key location, Consumer<Executor> updater) {
+        updater.accept(Util.backgroundExecutor());
         this.reloaders.put(location, updater);
     }
 
     public void rebuildAfterLanguageChange() {
-        for (Runnable value : this.reloaders.values()) {
-            value.run();
+        this.rebuildAfterLanguageChange(Util.backgroundExecutor());
+    }
+
+    public void rebuildAfterLanguageChange(Executor executor) {
+        for (Consumer<Executor> value : this.reloaders.values()) {
+            value.accept(executor);
         }
     }
 
@@ -58,7 +64,7 @@ public class SessionSearchTrees {
     public void updateRecipes(ClientRecipeBook recipeBook, Level level) {
         this.register(
             RECIPE_COLLECTIONS,
-            () -> {
+            executor -> {
                 List<RecipeCollection> recipes = recipeBook.getCollections();
                 RegistryAccess registryAccess = level.registryAccess();
                 Registry<Item> itemRegistries = registryAccess.lookupOrThrow(Registries.ITEM);
@@ -77,7 +83,7 @@ public class SessionSearchTrees {
                             .map(stack -> itemRegistries.getKey(stack.getItem())),
                         recipes
                     ),
-                    Util.backgroundExecutor()
+                    executor
                 );
                 previous.cancel(true);
             }
@@ -91,10 +97,10 @@ public class SessionSearchTrees {
     public void updateCreativeTags(List<ItemStack> items) {
         this.register(
             CREATIVE_TAGS,
-            () -> {
+            executor -> {
                 CompletableFuture<?> previous = this.creativeByTagSearch;
                 this.creativeByTagSearch = CompletableFuture.supplyAsync(
-                    () -> new IdSearchTree<>(itemStack -> itemStack.tags().map(TagKey::location), items), Util.backgroundExecutor()
+                    () -> new IdSearchTree<>(itemStack -> itemStack.tags().map(TagKey::location), items), executor
                 );
                 previous.cancel(true);
             }
@@ -108,7 +114,7 @@ public class SessionSearchTrees {
     public void updateCreativeTooltips(HolderLookup.Provider registries, List<ItemStack> itemStacks) {
         this.register(
             CREATIVE_NAMES,
-            () -> {
+            executor -> {
                 Item.TooltipContext tooltipContext = Item.TooltipContext.of(registries);
                 TooltipFlag tooltipFlag = TooltipFlag.Default.NORMAL.asCreative();
                 CompletableFuture<?> previous = this.creativeByNameSearch;
@@ -118,7 +124,7 @@ public class SessionSearchTrees {
                         itemStack -> itemStack.typeHolder().unwrapKey().map(ResourceKey::identifier).stream(),
                         itemStacks
                     ),
-                    Util.backgroundExecutor()
+                    executor
                 );
                 previous.cancel(true);
             }

@@ -47,6 +47,10 @@ public class ViewArea {
         return this.sections.size();
     }
 
+    public Iterable<SectionRenderDispatcher.RenderSection> allcraftSections() {
+        return this.sections;
+    }
+
     public int minY() {
         return this.minY;
     }
@@ -89,6 +93,10 @@ public class ViewArea {
     }
 
     protected SectionRenderDispatcher.@Nullable RenderSection getRenderSection(long sectionNode) {
+        return this.sections.getValue(sectionNode);
+    }
+
+    public SectionRenderDispatcher.@Nullable RenderSection allcraftGetRenderSection(long sectionNode) {
         return this.sections.getValue(sectionNode);
     }
 }

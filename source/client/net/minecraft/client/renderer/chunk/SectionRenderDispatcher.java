@@ -50,6 +50,7 @@ public class SectionRenderDispatcher {
     private final Consumer<SectionRenderDispatcher.RenderSection> onSectionMeshUpdate;
     private final AtomicReference<Vec3> cameraPosition = new AtomicReference<>(Vec3.ZERO);
     private volatile SectionCompiler sectionCompiler;
+    private volatile long allcraftModelGeneration;
     private final StagingBuffer stagingBuffer;
     private final Map<ChunkSectionLayer, SectionRenderDispatcher.SectionUberBuffers> chunkUberBuffers;
     private final ReentrantLock copyLock = new ReentrantLock();
@@ -80,6 +81,15 @@ public class SectionRenderDispatcher {
 
     public void setCompiler(SectionCompiler sectionCompiler) {
         this.sectionCompiler = sectionCompiler;
+    }
+
+    public long allcraftSetCompiler(SectionCompiler sectionCompiler) {
+        this.sectionCompiler = sectionCompiler;
+        return ++this.allcraftModelGeneration;
+    }
+
+    public long allcraftModelGeneration() {
+        return this.allcraftModelGeneration;
     }
 
     private void runTask() {
@@ -312,8 +322,30 @@ public class SectionRenderDispatcher {
         private SectionRenderDispatcher.RenderSection.SectionTask createCompileTask(RenderSectionRegion region) {
             this.cancelTasks();
             boolean isRecompile = this.sectionMesh.get() != CompiledSectionMesh.UNCOMPILED;
-            this.lastCompileTask = new SectionRenderDispatcher.RenderSection.CompileTask(region, isRecompile);
+            this.lastCompileTask = new SectionRenderDispatcher.RenderSection.CompileTask(
+                region,
+                isRecompile,
+                SectionRenderDispatcher.this.sectionCompiler,
+                SectionRenderDispatcher.this.allcraftModelGeneration
+            );
             return this.lastCompileTask;
+        }
+
+        public boolean allcraftNeedsModelGeneration(long generation) {
+            SectionMesh mesh = this.sectionMesh.get();
+            long compiledGeneration = mesh instanceof CompiledSectionMesh compiled ? compiled.allcraftModelGeneration() : generation;
+            if (compiledGeneration >= generation) {
+                return false;
+            }
+
+            // Suppress duplicate dirty marks only while a real current-generation compile exists.
+            // A cancelled task must not permanently strand this section on an old model snapshot.
+            CompileTask task = this.lastCompileTask;
+            return task == null || task.modelGeneration < generation || task.isCancelled.get();
+        }
+
+        public boolean allcraftRequestModelGeneration(long generation) {
+            return this.allcraftNeedsModelGeneration(generation);
         }
 
         public void compileAsync(RenderSectionRegion region) {
@@ -417,10 +449,14 @@ public class SectionRenderDispatcher {
 
         private class CompileTask extends SectionRenderDispatcher.RenderSection.SectionTask {
             private final RenderSectionRegion region;
+            private final SectionCompiler compiler;
+            private final long modelGeneration;
 
-            public CompileTask(RenderSectionRegion region, boolean isRecompile) {
+            public CompileTask(RenderSectionRegion region, boolean isRecompile, SectionCompiler compiler, long modelGeneration) {
                 super(isRecompile);
                 this.region = region;
+                this.compiler = compiler;
+                this.modelGeneration = modelGeneration;
             }
 
             @Override
@@ -439,12 +475,12 @@ public class SectionRenderDispatcher {
 
                 SectionCompiler.Results results;
                 try (Zone ignored = Profiler.get().zone("Compile Section")) {
-                    results = SectionRenderDispatcher.this.sectionCompiler
-                        .compile(sectionPos, this.region, RenderSection.this.createVertexSorting(sectionPos, cameraPos), buffers);
+                    results = this.compiler.compile(sectionPos, this.region, RenderSection.this.createVertexSorting(sectionPos, cameraPos), buffers);
                 }
 
                 TranslucencyPointOfView translucencyPointOfView = TranslucencyPointOfView.of(cameraPos, sectionNode);
                 CompiledSectionMesh compiledSectionMesh = new CompiledSectionMesh(translucencyPointOfView, results);
+                compiledSectionMesh.allcraftSetModelGeneration(this.modelGeneration);
                 if (results.renderedLayers.isEmpty()) {
                     SectionMesh oldMesh = RenderSection.this.setSectionMesh(compiledSectionMesh);
                     SectionRenderDispatcher.this.copyLock.lock();

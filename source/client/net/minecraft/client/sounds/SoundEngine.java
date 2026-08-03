@@ -101,6 +101,19 @@ public class SoundEngine {
         this.loadLibrary();
     }
 
+    public void allcraftInvalidateBuffers(Set<Identifier> locations) {
+        this.soundBuffers.allcraftInvalidate(locations);
+    }
+
+    /** Preloads newly registered sounds without destroying and recreating the OpenAL device. */
+    public void allcraftFlushPreloads() {
+        if (!this.preloadQueue.isEmpty()) {
+            List<Sound> pending = List.copyOf(this.preloadQueue);
+            this.preloadQueue.clear();
+            this.soundBuffers.preload(pending);
+        }
+    }
+
     private synchronized void loadLibrary() {
         if (!this.loaded) {
             try {

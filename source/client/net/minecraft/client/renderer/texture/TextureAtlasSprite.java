@@ -46,6 +46,10 @@ public class TextureAtlasSprite implements AutoCloseable {
         return this.y;
     }
 
+    public int allcraftPadding() {
+        return this.padding;
+    }
+
     public float getU0() {
         return this.u0;
     }

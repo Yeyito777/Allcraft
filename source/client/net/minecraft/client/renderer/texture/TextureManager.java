@@ -187,6 +187,28 @@ public class TextureManager implements PreparableReloadListener, AutoCloseable {
         }, executor));
     }
 
+    /** Reloads only standalone textures whose backing resource changed. Atlas sprites are handled by AtlasManager. */
+    public CompletableFuture<Integer> allcraftReloadTextures(
+        ResourceManager manager, Set<Identifier> changedResources, Executor taskExecutor, Executor reloadExecutor
+    ) {
+        List<TextureManager.PendingReload> reloads = new ArrayList<>();
+        this.byPath.forEach((id, texture) -> {
+            if (texture instanceof ReloadableTexture reloadableTexture && changedResources.contains(reloadableTexture.resourceId())) {
+                reloads.add(scheduleLoad(manager, id, reloadableTexture, taskExecutor));
+            }
+        });
+        if (reloads.isEmpty()) {
+            return CompletableFuture.completedFuture(0);
+        }
+        return CompletableFuture.allOf(reloads.stream().map(TextureManager.PendingReload::newContents).toArray(CompletableFuture[]::new))
+            .thenApplyAsync(unused -> {
+                for (TextureManager.PendingReload reload : reloads) {
+                    reload.texture.apply(reload.newContents.join());
+                }
+                return reloads.size();
+            }, reloadExecutor);
+    }
+
     private record PendingReload(ReloadableTexture texture, CompletableFuture<TextureContents> newContents) {
     }
 }
