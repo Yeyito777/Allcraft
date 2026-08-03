@@ -25,6 +25,8 @@ The runtime tests each compile and activate one real source/bytecode patch:
 | `no-world-gen` | Redefines server chunk-generation classes | Travel into never-generated chunks; they should be empty |
 | `new-class` | Adds and invokes new client and server classes | No manual step; both entrypoints must run for `PASS` |
 | `registry-block` | Adds a synchronized block/item with stable registry and block-state IDs | Craft one dirt or run `/give @s allcraft:runtime_block`, then place it |
+| `new-item` | Adds a synchronized item, component initializer, model, texture, language, and recipe | Craft amethyst plus redstone or run `/give @s allcraft:runtime_crystal` |
+| `new-particle` | Adds a synchronized particle type, wire ID, client provider, description, and atlas sprite | Run `/particle allcraft:runtime_spark ~ ~1 ~ 0.5 0.5 0.5 0.02 100` |
 
 The resource tests edit the world's authoritative source, stream resource/data overlays, reload them without a loading screen, and verify the active bytes:
 

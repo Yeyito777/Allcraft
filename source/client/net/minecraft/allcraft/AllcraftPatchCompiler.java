@@ -32,7 +32,7 @@ import org.slf4j.Logger;
 /** Server-side compiler for real source-changing Allcraft test patches. */
 public final class AllcraftPatchCompiler {
     public static final List<String> RUNTIME_TEST_NAMES = List.of(
-        "double-jump", "no-world-gen", "flying-boats", "new-class", "registry-block"
+        "double-jump", "no-world-gen", "flying-boats", "new-class", "registry-block", "new-item", "new-particle"
     );
     public static final List<String> RESOURCE_TEST_NAMES = List.of(
         "live-texture", "live-model", "live-sound", "live-language", "live-recipe", "live-resource-delete",
@@ -67,6 +67,8 @@ public final class AllcraftPatchCompiler {
             case "no-world-gen" -> noWorldGenerationEdits(worldSource);
             case "new-class" -> newClassEdits(worldSource);
             case "registry-block" -> registryBlockEdits(worldSource);
+            case "new-item" -> newItemEdits(worldSource);
+            case "new-particle" -> newParticleEdits(worldSource);
             default -> List.of();
         };
         List<ResourceEdit> resourceEdits = resourceEdits(worldSource, testName);
@@ -137,6 +139,8 @@ public final class AllcraftPatchCompiler {
             case "no-world-gen" -> noWorldGenerationEdits(worldSource);
             case "new-class" -> newClassEdits(worldSource);
             case "registry-block" -> registryBlockEdits(worldSource);
+            case "new-item" -> newItemEdits(worldSource);
+            case "new-particle" -> newParticleEdits(worldSource);
             default -> List.of();
         };
         List<ResourceEdit> resourceEdits = resourceEdits(worldSource, testName);
@@ -314,6 +318,90 @@ public final class AllcraftPatchCompiler {
                 registryBlockSource("ServerRegistryBlock", "server")
             )
         );
+    }
+
+    private static List<SourceEdit> newItemEdits(Path sourceRoot) throws IOException {
+        return List.of(
+            editGenerated(
+                sourceRoot,
+                "client/net/minecraft/allcraft/generated/ClientNewItem.java",
+                newItemSource("ClientNewItem", "client")
+            ),
+            editGenerated(
+                sourceRoot,
+                "server/net/minecraft/allcraft/generated/ServerNewItem.java",
+                newItemSource("ServerNewItem", "server")
+            )
+        );
+    }
+
+    private static String newItemSource(String className, String side) {
+        return "package net.minecraft.allcraft.generated;\n\n"
+            + "import net.minecraft.allcraft.AllcraftRegistries;\n"
+            + "import net.minecraft.core.registries.BuiltInRegistries;\n"
+            + "import net.minecraft.core.registries.Registries;\n"
+            + "import net.minecraft.resources.Identifier;\n"
+            + "import net.minecraft.resources.ResourceKey;\n"
+            + "import net.minecraft.world.item.Item;\n\n"
+            + "public final class " + className + " {\n"
+            + "    private static final Identifier ID = Identifier.fromNamespaceAndPath(\"allcraft\", \"runtime_crystal\");\n"
+            + "    private static final ResourceKey<Item> KEY = ResourceKey.create(Registries.ITEM, ID);\n"
+            + "    public static Item item;\n\n"
+            + "    private " + className + "() {\n"
+            + "    }\n\n"
+            + "    public static void allcraftActivate() {\n"
+            + "        item = AllcraftRegistries.registerLazy(\n"
+            + "            BuiltInRegistries.ITEM, KEY, () -> new Item(new Item.Properties().setId(KEY).stacksTo(16))\n"
+            + "        );\n"
+            + "        System.setProperty(\"allcraft.new-item." + side + "\", Integer.toString(BuiltInRegistries.ITEM.getId(item)));\n"
+            + "    }\n"
+            + "}\n";
+    }
+
+    private static List<SourceEdit> newParticleEdits(Path sourceRoot) throws IOException {
+        return List.of(
+            editGenerated(
+                sourceRoot,
+                "client/net/minecraft/allcraft/generated/ClientNewParticle.java",
+                newParticleSource("ClientNewParticle", "client", true)
+            ),
+            editGenerated(
+                sourceRoot,
+                "server/net/minecraft/allcraft/generated/ServerNewParticle.java",
+                newParticleSource("ServerNewParticle", "server", false)
+            )
+        );
+    }
+
+    private static String newParticleSource(String className, String side, boolean client) {
+        return "package net.minecraft.allcraft.generated;\n\n"
+            + "import net.minecraft.allcraft.AllcraftRegistries;\n"
+            + (client ? "import net.minecraft.client.Minecraft;\nimport net.minecraft.client.particle.FlameParticle;\n" : "")
+            + "import net.minecraft.core.particles.ParticleType;\n"
+            + "import net.minecraft.core.particles.SimpleParticleType;\n"
+            + "import net.minecraft.core.registries.BuiltInRegistries;\n"
+            + "import net.minecraft.core.registries.Registries;\n"
+            + "import net.minecraft.resources.Identifier;\n"
+            + "import net.minecraft.resources.ResourceKey;\n\n"
+            + "public final class " + className + " {\n"
+            + "    private static final Identifier ID = Identifier.fromNamespaceAndPath(\"allcraft\", \"runtime_spark\");\n"
+            + "    private static final ResourceKey<ParticleType<?>> KEY = ResourceKey.create(Registries.PARTICLE_TYPE, ID);\n"
+            + "    public static SimpleParticleType type;\n\n"
+            + "    private " + className + "() {\n"
+            + "    }\n\n"
+            + "    public static void allcraftActivate() {\n"
+            + "        type = (SimpleParticleType)AllcraftRegistries.registerLazy(\n"
+            + "            BuiltInRegistries.PARTICLE_TYPE, KEY, RuntimeParticleType::new\n"
+            + "        );\n"
+            + (client ? "        Minecraft.getInstance().particleEngine.allcraftRegister(type, FlameParticle.Provider::new);\n" : "")
+            + "        System.setProperty(\"allcraft.new-particle." + side + "\", Integer.toString(BuiltInRegistries.PARTICLE_TYPE.getId(type)));\n"
+            + "    }\n\n"
+            + "    public static final class RuntimeParticleType extends SimpleParticleType {\n"
+            + "        public RuntimeParticleType() {\n"
+            + "            super(false);\n"
+            + "        }\n"
+            + "    }\n"
+            + "}\n";
     }
 
     private static String registryBlockSource(String className, String side) {
@@ -501,6 +589,52 @@ public final class AllcraftPatchCompiler {
                     sourceRoot, "client/assets/minecraft/models/block/dirt.json", cubeAllModel("allcraft:manifest_sprite")
                 )
             );
+            case "new-item" -> {
+                byte[] recipe = ("{\n"
+                        + "  \"type\": \"minecraft:crafting_shapeless\",\n"
+                        + "  \"category\": \"misc\",\n"
+                        + "  \"ingredients\": [\"minecraft:amethyst_shard\", \"minecraft:redstone\"],\n"
+                        + "  \"result\": {\"count\": 1, \"id\": \"allcraft:runtime_crystal\"}\n"
+                        + "}\n")
+                    .getBytes(StandardCharsets.UTF_8);
+                yield List.of(
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/textures/item/runtime_crystal.png",
+                        checkerTexture(16, 16, 0xFF40E0FF, 0xFF9030FF)
+                    ),
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/models/item/runtime_crystal.json",
+                        ("{\n"
+                                + "  \"parent\": \"minecraft:item/generated\",\n"
+                                + "  \"textures\": {\"layer0\": \"allcraft:item/runtime_crystal\"}\n"
+                                + "}\n")
+                            .getBytes(StandardCharsets.UTF_8)
+                    ),
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/items/runtime_crystal.json",
+                        "{\n  \"model\": {\"type\": \"minecraft:model\", \"model\": \"allcraft:item/runtime_crystal\"}\n}\n"
+                            .getBytes(StandardCharsets.UTF_8)
+                    ),
+                    languageEntry(sourceRoot, "item.allcraft.runtime_crystal", "Runtime Crystal"),
+                    resourceEditGenerated(sourceRoot, "client/data/allcraft/recipe/runtime_crystal.json", recipe),
+                    resourceEditGenerated(sourceRoot, "server/data/allcraft/recipe/runtime_crystal.json", recipe)
+                );
+            }
+            case "new-particle" -> List.of(
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/allcraft/textures/particle/runtime_spark.png",
+                    checkerTexture(16, 16, 0xFFFF5020, 0xFFFFFF40)
+                ),
+                resourceEditGenerated(
+                    sourceRoot,
+                    "client/assets/allcraft/particles/runtime_spark.json",
+                    "{\n  \"textures\": [\"allcraft:runtime_spark\"]\n}\n".getBytes(StandardCharsets.UTF_8)
+                )
+            );
             case "registry-block" -> {
                 byte[] recipe = ("{\n"
                         + "  \"type\": \"minecraft:crafting_shapeless\",\n"
@@ -593,6 +727,30 @@ public final class AllcraftPatchCompiler {
             throw new IOException("PNG encoder is unavailable");
         }
         return output.toByteArray();
+    }
+
+    private static ResourceEdit languageEntry(Path sourceRoot, String key, String value) throws IOException {
+        String relative = "client/assets/allcraft/lang/en_us.json";
+        Path path = sourceRoot.resolve(relative);
+        if (!Files.isRegularFile(path)) {
+            return resourceEditGenerated(
+                sourceRoot, relative, ("{\n  \"" + key + "\": \"" + value + "\"\n}\n").getBytes(StandardCharsets.UTF_8)
+            );
+        }
+        return resourceEditExisting(sourceRoot, relative, bytes -> {
+            String language = new String(bytes, StandardCharsets.UTF_8);
+            if (language.contains("\"" + key + "\"")) {
+                return bytes;
+            }
+            int end = language.lastIndexOf('}');
+            if (end < 0) {
+                throw new IllegalArgumentException("invalid allcraft language JSON");
+            }
+            String prefix = language.substring(0, end).stripTrailing();
+            boolean hasEntries = prefix.lastIndexOf('{') < prefix.length() - 1;
+            String updated = prefix + (hasEntries ? "," : "") + "\n  \"" + key + "\": \"" + value + "\"\n}\n";
+            return updated.getBytes(StandardCharsets.UTF_8);
+        });
     }
 
     private static ResourceEdit resourceEditExisting(Path sourceRoot, String relative, UnaryOperator<byte[]> transform) throws IOException {
@@ -731,6 +889,8 @@ public final class AllcraftPatchCompiler {
             }
             case "new-class" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientRuntimeProbe.java"));
             case "registry-block" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientRegistryBlock.java"));
+            case "new-item" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewItem.java"));
+            case "new-particle" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewParticle.java"));
             default -> List.of();
         };
     }
@@ -740,6 +900,8 @@ public final class AllcraftPatchCompiler {
             case "no-world-gen" -> List.of(sourceRoot.resolve(SERVER_NOISE_GENERATOR), sourceRoot.resolve(SERVER_CHUNK_GENERATOR));
             case "new-class" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerRuntimeProbe.java"));
             case "registry-block" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerRegistryBlock.java"));
+            case "new-item" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerNewItem.java"));
+            case "new-particle" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerNewParticle.java"));
             default -> List.of();
         };
     }
@@ -749,6 +911,8 @@ public final class AllcraftPatchCompiler {
             case "double-jump" -> List.of("net.minecraft.client.player.AllcraftDoubleJump");
             case "new-class" -> List.of("net.minecraft.allcraft.generated.ClientRuntimeProbe");
             case "registry-block" -> List.of("net.minecraft.allcraft.generated.ClientRegistryBlock");
+            case "new-item" -> List.of("net.minecraft.allcraft.generated.ClientNewItem");
+            case "new-particle" -> List.of("net.minecraft.allcraft.generated.ClientNewParticle");
             default -> List.of();
         };
     }
@@ -757,6 +921,8 @@ public final class AllcraftPatchCompiler {
         return switch (testName) {
             case "new-class" -> List.of("net.minecraft.allcraft.generated.ServerRuntimeProbe");
             case "registry-block" -> List.of("net.minecraft.allcraft.generated.ServerRegistryBlock");
+            case "new-item" -> List.of("net.minecraft.allcraft.generated.ServerNewItem");
+            case "new-particle" -> List.of("net.minecraft.allcraft.generated.ServerNewParticle");
             default -> List.of();
         };
     }
@@ -768,6 +934,8 @@ public final class AllcraftPatchCompiler {
             case "no-world-gen" -> "Travel into never-generated chunks; new terrain should be empty";
             case "new-class" -> "New client and server classes were loaded and their activation methods ran";
             case "registry-block" -> "Craft one dirt or run /give @s allcraft:runtime_block, then place the new synchronized block";
+            case "new-item" -> "Craft amethyst plus redstone or run /give @s allcraft:runtime_crystal; the new item should have its live model";
+            case "new-particle" -> "Run /particle allcraft:runtime_spark ~ ~1 ~ 0.5 0.5 0.5 0.02 100; the new orange/yellow particle should render";
             case "live-texture" -> "Dirt textures should become a magenta-and-black checkerboard immediately";
             case "live-model" -> "Dirt blocks should immediately render with the diamond-block model texture";
             case "live-sound" -> "The automatic experience-orb preview should play the ominous-effect sound";

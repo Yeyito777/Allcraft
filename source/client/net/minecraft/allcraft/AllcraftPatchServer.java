@@ -572,7 +572,7 @@ public final class AllcraftPatchServer {
                     case "timing" -> new StepSpec(
                         "title", "Timing patch delayed by " + timingDelays[step - 1] + " ticks", step * 256, timingDelays[step - 1]
                     );
-                    case "double-jump", "no-world-gen", "flying-boats", "new-class", "registry-block",
+                    case "double-jump", "no-world-gen", "flying-boats", "new-class", "registry-block", "new-item", "new-particle",
                         "live-texture", "live-model", "live-sound", "live-language", "live-recipe", "live-resource-delete",
                         "asset-new-sprite", "asset-resized-sprite", "asset-animated-sprite", "asset-atlas-delete", "asset-font",
                         "asset-shader", "asset-particle", "asset-gui", "asset-live-sound", "asset-mass-model", "asset-atlas-manifest" -> new StepSpec(
