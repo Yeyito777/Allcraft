@@ -1,11 +1,13 @@
 package allcraft.registrytest;
 
 import com.mojang.serialization.Lifecycle;
+import java.util.List;
 import net.minecraft.allcraft.AllcraftRegistries;
 import net.minecraft.core.Holder;
 import net.minecraft.core.MappedRegistry;
 import net.minecraft.core.RegistrationInfo;
 import net.minecraft.core.Registry;
+import net.minecraft.core.RegistryAccess;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 
@@ -42,6 +44,7 @@ public final class RegistryEvolutionRegression {
 
         testIntrusiveRegistration();
         testCommittedRetirementAndReplay();
+        testDynamicRegistryAccess();
         testPlanConflict();
         System.out.println("PASS registry-evolution");
     }
@@ -127,6 +130,27 @@ public final class RegistryEvolutionRegression {
         require(failed, "mismatched client registry plan was accepted");
         transaction.rollback();
         assertBaseOnly(registry);
+    }
+
+    private static void testDynamicRegistryAccess() throws Exception {
+        MappedRegistry<Value> dynamic = new MappedRegistry<>(REGISTRY_KEY, Lifecycle.stable());
+        dynamic.bindAllTagsToEmpty();
+        dynamic.freeze();
+        RegistryAccess access = new RegistryAccess.ImmutableRegistryAccess(List.of(dynamic));
+        AllcraftRegistries.Transaction transaction = AllcraftRegistries.transaction("dynamic-world", "server", 4L, "dynamic");
+        transaction.registryAccess(access);
+        Value value = new Value("dynamic-layer");
+        AllcraftRegistries.run(
+            transaction,
+            () -> require(
+                AllcraftRegistries.registerLazy(REGISTRY_KEY, DYNAMIC, () -> value) == value,
+                "dynamic registry layer did not publish the supplied value"
+            )
+        );
+        transaction.closePublication();
+        require(access.lookupOrThrow(REGISTRY_KEY).getValue(DYNAMIC) == value, "dynamic registry access did not expose the published value");
+        transaction.rollback();
+        require(!dynamic.containsKey(DYNAMIC), "dynamic registry rollback leaked a key");
     }
 
     private static MappedRegistry<Value> registry() {

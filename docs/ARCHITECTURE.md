@@ -123,9 +123,17 @@ Actual class redefinition still requires a short JVM safepoint. The bundled Allc
 - The server assigns stable numeric IDs and sends an ordered registry plan with the client artifact.
 - Every client applies the exact IDs and returns a full registry fingerprint with `APPLIED`; a mismatch aborts the revision.
 - Additions, replacements, retirement, controlled removal, intrusive holders, block/fluid state IDs, and common client dispatch maps are journaled for rollback.
+- The same transaction can resolve and evolve a registry from the active world registry layer; touched dynamic registries are included in the synchronized plan and digest.
 - Published IDs are process-lifetime identities. World exit retains additions as retired tombstones, and artifact replay reactivates them with the same holders and IDs.
 
 See [REGISTRY-EVOLUTION.md](REGISTRY-EVOLUTION.md) for the mutation API and identity rules.
+
+### Runtime input application
+
+- Client entrypoints can register world-scoped key mappings through `AllcraftKeyMappings`.
+- Dynamic keys participate in the normal input indexes, controls UI, sorting, conflict display, rebinding, and options persistence.
+- The user's binding is retained while a key is inactive, then restored when its world revision replays.
+- Mapping callbacks, custom categories, open controls screens, rollback, and world switching use the same revision journal as registries.
 
 ## Revision and cache strategy
 

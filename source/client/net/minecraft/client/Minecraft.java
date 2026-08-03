@@ -2210,6 +2210,7 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
     }
 
     private void handleKeybinds() {
+        net.minecraft.allcraft.AllcraftKeyMappings.tick();
         while (this.options.keyTogglePerspective.consumeClick()) {
             CameraType previous = this.options.getCameraType();
             this.options.setCameraType(this.options.getCameraType().cycle());

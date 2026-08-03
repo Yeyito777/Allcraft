@@ -7,7 +7,7 @@ Allcraft can mutate frozen Minecraft registries from a world revision without gl
 - Registry writes are accepted only while an `AllcraftRegistries.Transaction` owns the current thread.
 - The authoritative server assigns every registry numeric ID and emits an ordered registry plan.
 - Clients consume that exact plan; a different operation, key, registry, ID, or operation count aborts the revision.
-- After publication, peers compare a SHA-256 fingerprint of all built-in registry keys, IDs, retirement states, and block/fluid state IDs before accepting `APPLIED`.
+- After publication, peers compare a SHA-256 fingerprint of all built-in registries plus every world-layer registry named by the mutation plan before accepting `APPLIED`.
 - The registry journal participates in the same publish, rollback, finalize, world-exit, and replay lifecycle as classes and resources.
 
 ## Runtime API
@@ -21,6 +21,9 @@ AllcraftRegistries.replace(registry, key, value);
 AllcraftRegistries.retire(registry, key);
 AllcraftRegistries.reactivate(registry, key);
 AllcraftRegistries.remove(registry, key);
+
+// Resolve and mutate the active world's dynamic registry layer:
+AllcraftRegistries.registerLazy(Registries.JUKEBOX_SONG, songKey, factory);
 ```
 
 `registerLazy` is the normal addition/replay operation. It preserves the original value, holder, and wire ID when reopening a world.
@@ -43,8 +46,10 @@ Allcraft updates the vanilla state that is normally built only during bootstrap:
 - global block-state and fluid-state numeric tables;
 - block-item mappings and holder component lookups;
 - item component initializers;
-- client registration hooks for entity renderers, menu screens, and particle providers;
+- atomically published live entity/block-entity renderers, menu screens, and particle providers;
 - entity default attributes and spawn placements.
+
+Dynamic registry access is supplied separately on each peer (server world access or the client packet listener's synchronized access). Only registries touched by the ordered plan participate in its cross-peer digest, avoiding unrelated layer differences while still proving every evolved key and ID.
 
 Core configuration fields on blocks, items, fluids, entity types, block entities, menus, particles, and block behavior are no longer `final`, allowing explicit revision migrations to update them.
 
@@ -57,6 +62,7 @@ Adding and retiring entries is general. Replacing the object identity behind an 
 ```bash
 tests/registries/run.sh
 tests/jvm/minecraft-smoke.sh jvm/linux-x64 registry-block
+tests/jvm/minecraft-smoke.sh jvm/linux-x64 new-mob new-music-disc lapis-crafting-table
 ```
 
 The unit regression covers exact server/client plans, add/ensure/replace/retire/reactivate/remove, intrusive holders, rollback, committed tombstones, replay, and plan-conflict rejection. The Minecraft smoke test adds a synchronized block and item, reloads its models/language/recipe, exits the world, and reopens the committed revision.

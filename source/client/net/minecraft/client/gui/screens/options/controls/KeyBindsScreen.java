@@ -52,6 +52,15 @@ public class KeyBindsScreen extends OptionsSubScreen {
         bottomButtons.addChild(Button.builder(CommonComponents.GUI_DONE, button -> this.onClose()).build());
     }
 
+    /** Rebuilds an already-open controls screen after a world-scoped mapping is added or removed. */
+    public void allcraftRefreshMappings() {
+        if (this.selectedKey != null && KeyMapping.get(this.selectedKey.getName()) != this.selectedKey) {
+            this.selectedKey = null;
+        }
+        this.layout.removeChildren();
+        this.rebuildWidgets();
+    }
+
     @Override
     protected void repositionElements() {
         this.layout.arrangeElements();

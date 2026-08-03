@@ -3,6 +3,7 @@ package net.minecraft.client.renderer.entity;
 import com.google.common.collect.ImmutableMap;
 import com.mojang.blaze3d.vertex.PoseStack;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.function.Supplier;
 import net.minecraft.CrashReport;
 import net.minecraft.CrashReportCategory;
@@ -60,6 +61,7 @@ public class EntityRenderDispatcher implements ResourceManagerReloadListener {
     private final Supplier<EntityModelSet> entityModels;
     private final EquipmentAssetManager equipmentAssets;
     private final PlayerSkinRenderCache playerSkinRenderCache;
+    private @Nullable ResourceManager resourceManager;
 
     public <E extends Entity> int getPackedLightCoords(E entity, float partialTickTime) {
         return this.getRenderer(entity).getPackedLightCoords(entity, partialTickTime);
@@ -201,9 +203,31 @@ public class EntityRenderDispatcher implements ResourceManagerReloadListener {
         return this.itemInHandRenderer;
     }
 
-    @Override
-    public void onResourceManagerReload(ResourceManager resourceManager) {
-        EntityRendererProvider.Context context = new EntityRendererProvider.Context(
+    /** Builds a renderer candidate first, then publishes one live dispatcher entry transactionally. */
+    public synchronized <T extends Entity> void allcraftRegister(
+        EntityType<? extends T> type, EntityRendererProvider<T> provider
+    ) {
+        if (this.resourceManager == null) {
+            throw new IllegalStateException("Entity renderer resources are not initialized");
+        }
+        EntityRendererProvider.Context context = this.createContext(this.resourceManager);
+        EntityRenderer<?, ?> candidate = provider.create(context);
+        Map<EntityType<?>, EntityRenderer<?, ?>> previous = this.renderers;
+        Map<EntityType<?>, EntityRenderer<?, ?>> next = new HashMap<>(previous);
+        next.put(type, candidate);
+        this.renderers = Map.copyOf(next);
+        net.minecraft.allcraft.AllcraftRegistries.recordUndo(
+            "restore live entity renderer for " + net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(type),
+            () -> {
+                synchronized (EntityRenderDispatcher.this) {
+                    EntityRenderDispatcher.this.renderers = previous;
+                }
+            }
+        );
+    }
+
+    private EntityRendererProvider.Context createContext(ResourceManager resourceManager) {
+        return new EntityRendererProvider.Context(
             this,
             this.blockModelResolver,
             this.itemModelResolver,
@@ -215,6 +239,12 @@ public class EntityRenderDispatcher implements ResourceManagerReloadListener {
             this.font,
             this.playerSkinRenderCache
         );
+    }
+
+    @Override
+    public synchronized void onResourceManagerReload(ResourceManager resourceManager) {
+        this.resourceManager = resourceManager;
+        EntityRendererProvider.Context context = this.createContext(resourceManager);
         this.renderers = EntityRenderers.createEntityRenderers(context);
         this.playerRenderers = EntityRenderers.createAvatarRenderers(context);
         this.mannequinRenderers = EntityRenderers.createAvatarRenderers(context);

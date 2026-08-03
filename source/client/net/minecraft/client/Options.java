@@ -26,6 +26,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -755,7 +757,7 @@ public class Options {
         this.keyDebugNetworkCharts,
         this.keyDebugLightmapTexture
     };
-    public final KeyMapping[] keyMappings = Stream.of(
+    public volatile KeyMapping[] keyMappings = Stream.of(
             new KeyMapping[]{
                 this.keyAttack,
                 this.keyUse,
@@ -795,6 +797,7 @@ public class Options {
         )
         .flatMap(Stream::of)
         .toArray(KeyMapping[]::new);
+    private final Map<String, String> allcraftKeyBindings = new HashMap<>();
     protected Minecraft minecraft;
     private final File optionsFile;
     private CameraType cameraType = CameraType.FIRST_PERSON;
@@ -1631,6 +1634,7 @@ public class Options {
             if (!currentValue.equals(newValue)) {
                 keyMapping.setKey(InputConstants.getKey(newValue));
             }
+            this.allcraftKeyBindings.put(keyMapping.getName(), newValue);
         }
 
         for (SoundSource source : SoundSource.values()) {
@@ -1666,6 +1670,12 @@ public class Options {
             }
 
             final CompoundTag options = this.dataFix(rawOptions);
+            this.allcraftKeyBindings.clear();
+            for (String name : options.keySet()) {
+                if (name.startsWith("key_")) {
+                    options.getString(name).ifPresent(value -> this.allcraftKeyBindings.put(name.substring(4), value));
+                }
+            }
             this.processOptions(
                 new Options.FieldAccess() {
                     private @Nullable String getValue(String name) {
@@ -1836,11 +1846,57 @@ public class Options {
             if (fullscreenVideoModeString != null) {
                 writer.println("fullscreenResolution:" + fullscreenVideoModeString);
             }
+            Set<String> activeMappings = new HashSet<>();
+            for (KeyMapping mapping : this.keyMappings) {
+                activeMappings.add(mapping.getName());
+            }
+            this.allcraftKeyBindings.entrySet().stream().filter(entry -> !activeMappings.contains(entry.getKey())).sorted(Map.Entry.comparingByKey()).forEach(entry -> {
+                writer.println("key_" + entry.getKey() + ":" + entry.getValue());
+            });
         } catch (Exception e) {
             LOGGER.error("Failed to save options", e);
         }
 
         this.broadcastOptions();
+    }
+
+    /** Adds a mapping to persistence, conflict detection, and the live controls list. */
+    public synchronized void allcraftAddKeyMapping(KeyMapping mapping) {
+        for (KeyMapping existing : this.keyMappings) {
+            if (existing == mapping) {
+                return;
+            }
+            if (existing.getName().equals(mapping.getName())) {
+                throw new IllegalArgumentException("Key mapping '" + mapping.getName() + "' is already present in options");
+            }
+        }
+        String saved = this.allcraftKeyBindings.get(mapping.getName());
+        if (saved != null) {
+            mapping.setKey(InputConstants.getKey(saved));
+        }
+        KeyMapping[] next = Arrays.copyOf(this.keyMappings, this.keyMappings.length + 1);
+        next[next.length - 1] = mapping;
+        this.keyMappings = next;
+        KeyMapping.resetMapping();
+        this.allcraftRefreshKeyBindsScreen();
+    }
+
+    /** Removes a world-scoped mapping while preserving its user's binding for replay/rejoin. */
+    public synchronized void allcraftRemoveKeyMapping(KeyMapping mapping) {
+        this.allcraftKeyBindings.put(mapping.getName(), mapping.saveString());
+        List<KeyMapping> next = new ArrayList<>(Arrays.asList(this.keyMappings));
+        if (!next.removeIf(candidate -> candidate == mapping)) {
+            return;
+        }
+        this.keyMappings = next.toArray(KeyMapping[]::new);
+        KeyMapping.resetMapping();
+        this.allcraftRefreshKeyBindsScreen();
+    }
+
+    private void allcraftRefreshKeyBindsScreen() {
+        if (this.minecraft.gui.screen() instanceof net.minecraft.client.gui.screens.options.controls.KeyBindsScreen screen) {
+            screen.allcraftRefreshMappings();
+        }
     }
 
     private @Nullable String getFullscreenVideoModeString() {

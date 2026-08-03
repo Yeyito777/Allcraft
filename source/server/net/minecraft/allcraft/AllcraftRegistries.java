@@ -14,6 +14,8 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.IdentityHashMap;
+import java.util.Set;
 import java.util.function.Supplier;
 import net.minecraft.core.Holder;
 import net.minecraft.core.IdMapper;
@@ -122,6 +124,22 @@ public final class AllcraftRegistries {
         return ((WritableRegistry<T>)registry).register(key, value, RegistrationInfo.BUILT_IN).value();
     }
 
+    /** Resolves a registry from the active world registry layer. */
+    public static <T> Registry<T> registry(ResourceKey<? extends Registry<? extends T>> registryKey) {
+        Transaction transaction = ACTIVE.get();
+        if (transaction == null || transaction.registryAccess == null) {
+            throw new IllegalStateException("Dynamic registry access requires an active Allcraft revision transaction");
+        }
+        return transaction.registryAccess.lookupOrThrow(registryKey);
+    }
+
+    /** Adds or reactivates a value in the active world's layered registry access. */
+    public static <T> T registerLazy(
+        ResourceKey<? extends Registry<? extends T>> registryKey, ResourceKey<T> key, Supplier<? extends T> factory
+    ) {
+        return registerLazy(registry(registryKey), key, factory);
+    }
+
     public static <T> T replace(Registry<T> registry, ResourceKey<T> key, T value) {
         return mapped(registry).allcraftReplace(key, value, RegistrationInfo.BUILT_IN);
     }
@@ -208,6 +226,9 @@ public final class AllcraftRegistries {
 
     /** Consumes auxiliary ID-plan entries when an integrated client shares the server's registry object. */
     public static void onEnsured(ResourceKey<?> key, Object value) {
+        if (value instanceof Item) {
+            BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.reactivate(key);
+        }
         if (value instanceof Block block) {
             int stateIndex = 0;
             for (BlockState state : block.getStateDefinition().getPossibleStates()) {
@@ -238,6 +259,16 @@ public final class AllcraftRegistries {
 
     /** Hash of every built-in registry key/ID plus auxiliary block/fluid state IDs. */
     public static String fingerprint() {
+        return fingerprint(null);
+    }
+
+    /** Hashes built-ins and every registry visible through the selected live world layer. */
+    public static String fingerprint(RegistryAccess access) {
+        return fingerprint(access, null);
+    }
+
+    /** Hashes built-ins plus only dynamic registries named by the synchronized mutation plan. */
+    public static String fingerprint(RegistryAccess access, String planJson) {
         MessageDigest digest;
         try {
             digest = MessageDigest.getInstance("SHA-256");
@@ -245,7 +276,28 @@ public final class AllcraftRegistries {
             throw new IllegalStateException(e);
         }
         List<Registry<?>> registries = new ArrayList<>();
-        BuiltInRegistries.REGISTRY.forEach(value -> registries.add((Registry<?>)value));
+        Set<String> selectedDynamicRegistries = null;
+        if (planJson != null) {
+            selectedDynamicRegistries = new java.util.HashSet<>();
+            JsonArray plan = JsonParser.parseString(planJson.isBlank() ? "[]" : planJson).getAsJsonArray();
+            for (JsonElement element : plan) {
+                selectedDynamicRegistries.add(element.getAsJsonObject().get("registry").getAsString());
+            }
+        }
+        Set<String> selected = selectedDynamicRegistries;
+        Set<Registry<?>> identities = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        BuiltInRegistries.REGISTRY.forEach(value -> {
+            if (identities.add((Registry<?>)value)) {
+                registries.add((Registry<?>)value);
+            }
+        });
+        if (access != null) {
+            access.registries().forEach(entry -> {
+                if ((selected == null || selected.contains(entry.key().identifier().toString())) && identities.add(entry.value())) {
+                    registries.add(entry.value());
+                }
+            });
+        }
         registries.sort(java.util.Comparator.comparing(value -> value.key().identifier().toString()));
         for (Registry<?> registry : registries) {
             update(digest, registry.key().identifier().toString());
@@ -287,6 +339,7 @@ public final class AllcraftRegistries {
         private List<PlanEntry> expectedPlan;
         private int expectedIndex;
         private int mutationCount;
+        private RegistryAccess registryAccess;
         private boolean replaying;
         private boolean publicationClosed;
         private boolean rolledBack;
@@ -296,6 +349,13 @@ public final class AllcraftRegistries {
             this.side = side;
             this.revision = revision;
             this.patchId = patchId;
+        }
+
+        public synchronized void registryAccess(RegistryAccess registryAccess) {
+            if (this.publicationClosed || this.rolledBack) {
+                throw new IllegalStateException("Registry access was configured after transaction publication");
+            }
+            this.registryAccess = Objects.requireNonNull(registryAccess, "registryAccess");
         }
 
         public synchronized void expect(String json) {

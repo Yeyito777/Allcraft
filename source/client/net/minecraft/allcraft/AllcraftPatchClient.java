@@ -222,6 +222,7 @@ public final class AllcraftPatchClient {
             }
 
             staged.runtime.expectRegistryPlan(payload.registryPlan());
+            staged.runtime.registryAccess(connection.registryAccess());
             AllcraftRuntime.ApplyResult runtimeResult = staged.runtime.publish();
             if (staged.runtime.hasRegistryMutations() && minecraft.level != null) {
                 AllcraftRegistries.refreshComponents(minecraft.level.registryAccess());
@@ -371,6 +372,7 @@ public final class AllcraftPatchClient {
 
         String display = testPatch.get("display").getAsString();
         String message = testPatch.get("message").getAsString();
+        validateRuntimeFixture(minecraft, control.testName());
         Component component = Component.literal(
                 "[Allcraft "
                     + control.testName()
@@ -396,6 +398,46 @@ public final class AllcraftPatchClient {
                 minecraft.gui.hud.setTimes(5, 30, 5);
                 minecraft.gui.hud.setSubtitle(Component.literal("Server tick " + control.activationTick()).withStyle(ChatFormatting.GRAY));
                 minecraft.gui.hud.setTitle(component);
+            }
+            default -> {
+            }
+        }
+    }
+
+    private static void validateRuntimeFixture(Minecraft minecraft, String testName) throws IOException {
+        net.minecraft.resources.Identifier id;
+        switch (testName) {
+            case "new-mob" -> {
+                id = net.minecraft.resources.Identifier.fromNamespaceAndPath("allcraft", "runtime_cow");
+                if (!net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.containsKey(id)) {
+                    throw new IOException("new-mob entity type was not published");
+                }
+            }
+            case "new-music-disc" -> {
+                id = net.minecraft.resources.Identifier.fromNamespaceAndPath("allcraft", "runtime_music_disc");
+                if (!net.minecraft.core.registries.BuiltInRegistries.ITEM.containsKey(id)
+                    || minecraft.level == null
+                    || !minecraft.level.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.JUKEBOX_SONG).containsKey(id)) {
+                    throw new IOException("new-music-disc item or dynamic jukebox song was not published");
+                }
+            }
+            case "new-keybind" -> {
+                net.minecraft.client.KeyMapping mapping = net.minecraft.client.KeyMapping.get("key.allcraft.runtime_launch");
+                if (mapping == null || java.util.Arrays.stream(minecraft.options.keyMappings).noneMatch(candidate -> candidate == mapping)) {
+                    throw new IOException("new-keybind was not published into the input indexes and controls options");
+                }
+            }
+            case "lapis-crafting-table" -> {
+                id = net.minecraft.resources.Identifier.fromNamespaceAndPath("allcraft", "lapis_crafting_table");
+                net.minecraft.resources.Identifier recipeId = net.minecraft.resources.Identifier.fromNamespaceAndPath("allcraft", "lapis_table");
+                if (!net.minecraft.core.registries.BuiltInRegistries.BLOCK.containsKey(id)
+                    || !net.minecraft.core.registries.BuiltInRegistries.ITEM.containsKey(id)
+                    || !net.minecraft.core.registries.BuiltInRegistries.BLOCK_ENTITY_TYPE.containsKey(id)
+                    || !net.minecraft.core.registries.BuiltInRegistries.MENU.containsKey(id)
+                    || !net.minecraft.core.registries.BuiltInRegistries.RECIPE_TYPE.containsKey(recipeId)
+                    || !net.minecraft.core.registries.BuiltInRegistries.RECIPE_SERIALIZER.containsKey(recipeId)) {
+                    throw new IOException("lapis-crafting-table registries were not fully published");
+                }
             }
             default -> {
             }
@@ -485,7 +527,7 @@ public final class AllcraftPatchClient {
                     payload.patchId(),
                     payload.revision(),
                     payload.sha256(),
-                    AllcraftRegistries.fingerprint(),
+                    AllcraftRegistries.fingerprint(connection.registryAccess()),
                     message
                 )
             )
@@ -504,7 +546,7 @@ public final class AllcraftPatchClient {
                     payload.patchId(),
                     payload.revision(),
                     payload.sha256(),
-                    AllcraftRegistries.fingerprint(),
+                    AllcraftRegistries.fingerprint(connection.registryAccess(), payload.registryPlan()),
                     message
                 )
             )

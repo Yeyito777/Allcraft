@@ -96,13 +96,23 @@ public class KeyMapping implements Comparable<KeyMapping> {
     }
 
     public KeyMapping(String name, InputConstants.Type type, int value, KeyMapping.Category category, int order) {
+        this(name, type, value, category, order, true);
+    }
+
+    private KeyMapping(String name, InputConstants.Type type, int value, KeyMapping.Category category, int order, boolean register) {
         this.name = name;
         this.key = type.getOrCreate(value);
         this.defaultKey = this.key;
         this.category = category;
         this.order = order;
-        ALL.put(name, this);
-        this.registerMapping(this.key);
+        if (register) {
+            allcraftRegister(this);
+        }
+    }
+
+    /** Creates an unpublished mapping for transactional activation by Allcraft. */
+    public static KeyMapping allcraftCreate(String name, InputConstants.Type type, int value, KeyMapping.Category category) {
+        return new KeyMapping(name, type, value, category, 0, false);
     }
 
     public boolean isDown() {
@@ -198,6 +208,40 @@ public class KeyMapping implements Comparable<KeyMapping> {
         MAP.computeIfAbsent(key, k -> new ArrayList<>()).add(this);
     }
 
+    /** Publishes a mapping into the live input indexes. Used by world-scoped Allcraft mappings. */
+    public static synchronized boolean allcraftRegister(KeyMapping mapping) {
+        KeyMapping previous = ALL.get(mapping.name);
+        if (previous != null && previous != mapping) {
+            throw new IllegalArgumentException("Key mapping '" + mapping.name + "' is already registered");
+        }
+        if (previous == mapping) {
+            return false;
+        }
+        ALL.put(mapping.name, mapping);
+        mapping.registerMapping(mapping.key);
+        return true;
+    }
+
+    /** Removes a world-scoped mapping without affecting any mapping that replaced it. */
+    public static synchronized boolean allcraftUnregister(KeyMapping mapping) {
+        if (!ALL.remove(mapping.name, mapping)) {
+            return false;
+        }
+        List<KeyMapping> mappings = MAP.get(mapping.key);
+        if (mappings != null) {
+            mappings.remove(mapping);
+            if (mappings.isEmpty()) {
+                MAP.remove(mapping.key);
+            }
+        }
+        mapping.release();
+        return true;
+    }
+
+    public static synchronized boolean allcraftIsRegistered(KeyMapping mapping) {
+        return ALL.get(mapping.name) == mapping;
+    }
+
     public static @Nullable KeyMapping get(String name) {
         return ALL.get(name);
     }
@@ -225,6 +269,16 @@ public class KeyMapping implements Comparable<KeyMapping> {
 
             SORT_ORDER.add(category);
             return category;
+        }
+
+        public static synchronized void allcraftRegister(KeyMapping.Category category) {
+            if (!SORT_ORDER.contains(category)) {
+                SORT_ORDER.add(category);
+            }
+        }
+
+        public static synchronized void allcraftUnregister(KeyMapping.Category category) {
+            SORT_ORDER.remove(category);
         }
 
         public Component label() {

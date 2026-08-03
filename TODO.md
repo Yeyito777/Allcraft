@@ -9,7 +9,7 @@
   - [x] **3.4.** Patches to code, textures, sound, etc. (any part of the game) land seamlessly with no loading screens.
   - [x] **3.5.** Modify source to unlock any frozen registries, remove `final` on changeable vars, and tear down restrictions.
   - [ ] **3.6** Give the AI super-external tools like grep_texture, grep_sound, grep_craft, grep_uv...
-  - [ ] **3.6.** Test suite that tests 10 different patches from: adding new items, mobs, workstation blocks, blocks, movement options, keybinds, etc.
+  - [x] **3.6.** Test suite that tests 10 different patches from: adding new items, mobs, workstation blocks, blocks, movement options, keybinds, etc.
   - [ ] **3.7.** Wire up the AI so that it can do custom craftings on any workstation (Exocortex backend).
   - [ ] **3.8.** Wire up dynamic difficulty (zombie invasion, etc., where AI wakes up every `<n>` minutes and makes the world harder).
   - [ ] **3.9.** Wire up 10 AI tests in test suite 2.

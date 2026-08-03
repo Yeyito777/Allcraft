@@ -4,6 +4,8 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import com.google.common.collect.ImmutableMap.Builder;
 import java.util.Map;
+import net.minecraft.allcraft.AllcraftRegistries;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -16,10 +18,27 @@ import net.neoforged.api.distmarker.OnlyIn;
 public class BlockEntityRenderers {
     private static final Map<BlockEntityType<?>, BlockEntityRendererProvider<?, ?>> PROVIDERS = Maps.newHashMap();
 
-    private static <T extends BlockEntity, S extends BlockEntityRenderState> void register(
+    public static synchronized <T extends BlockEntity, S extends BlockEntityRenderState> void register(
         BlockEntityType<? extends T> type, BlockEntityRendererProvider<T, S> renderer
     ) {
-        PROVIDERS.put(type, renderer);
+        if (AllcraftRegistries.mutationAllowed()) {
+            Minecraft.getInstance().getBlockEntityRenderDispatcher().allcraftRegister(type, renderer);
+        }
+        BlockEntityRendererProvider<?, ?> previous = PROVIDERS.put(type, renderer);
+        if (previous != null && !AllcraftRegistries.mutationAllowed()) {
+            throw new IllegalStateException("Duplicate registration for " + BuiltInRegistries.BLOCK_ENTITY_TYPE.getKey(type));
+        }
+        if (AllcraftRegistries.mutationAllowed()) {
+            AllcraftRegistries.recordUndo("restore block-entity renderer provider for " + BuiltInRegistries.BLOCK_ENTITY_TYPE.getKey(type), () -> {
+                synchronized (BlockEntityRenderers.class) {
+                    if (previous == null) {
+                        PROVIDERS.remove(type);
+                    } else {
+                        PROVIDERS.put(type, previous);
+                    }
+                }
+            });
+        }
     }
 
     public static Map<BlockEntityType<?>, BlockEntityRenderer<?, ?>> createEntityRenderers(BlockEntityRendererProvider.Context context) {

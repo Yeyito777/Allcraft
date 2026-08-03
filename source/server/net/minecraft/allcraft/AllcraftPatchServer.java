@@ -177,7 +177,7 @@ public final class AllcraftPatchServer {
                 String stem = String.format("%08d-%s.jar", revision, patchId);
                 Path serverArtifact = patchesRoot.resolve("artifacts/server").resolve(stem);
                 if (Files.isRegularFile(serverArtifact)) {
-                    AllcraftRuntime.apply(serverArtifact, hashFromManifestOrFile(patch, "serverSha256", serverArtifact));
+                    AllcraftRuntime.apply(serverArtifact, hashFromManifestOrFile(patch, "serverSha256", serverArtifact), server.registryAccess());
                     serverArtifacts++;
                     serverResourceArtifacts.add(serverArtifact);
                 }
@@ -185,7 +185,7 @@ public final class AllcraftPatchServer {
                 if (integratedClient) {
                     Path clientArtifact = patchesRoot.resolve("artifacts/client").resolve(stem);
                     if (Files.isRegularFile(clientArtifact)) {
-                        AllcraftRuntime.apply(clientArtifact, hashFromManifestOrFile(patch, "clientSha256", clientArtifact));
+                        AllcraftRuntime.apply(clientArtifact, hashFromManifestOrFile(patch, "clientSha256", clientArtifact), server.registryAccess());
                         clientArtifacts++;
                         clientResourceArtifacts.add(clientArtifact);
                     }
@@ -193,6 +193,7 @@ public final class AllcraftPatchServer {
             }
 
             if (serverArtifacts > 0 || clientArtifacts > 0) {
+                AllcraftRegistries.refreshComponents(server.registryAccess());
                 LOGGER.info(
                     "Restored Allcraft world revision {} from {} server and {} integrated-client artifact(s)",
                     manifest.get("currentRevision").getAsLong(),
@@ -297,12 +298,13 @@ public final class AllcraftPatchServer {
                         if (patch.serverTransaction == null) {
                             patch.serverTransaction = AllcraftRuntime.stage(patch.serverArtifactPath, patch.serverSha256);
                         }
+                        patch.serverTransaction.registryAccess(server.registryAccess());
                         patch.serverApplyResult = patch.serverTransaction.publish();
                         if (patch.serverTransaction.hasRegistryMutations()) {
                             AllcraftRegistries.refreshComponents(server.registryAccess());
                         }
                         patch.registryPlan = patch.serverTransaction.registryPlan();
-                        patch.registryDigest = AllcraftRegistries.fingerprint();
+                        patch.registryDigest = AllcraftRegistries.fingerprint(server.registryAccess(), patch.registryPlan);
                         patch.serverResourceFuture = AllcraftServerResources.apply(
                             server, run.patchesRoot, patch.serverArtifactPath, run.testName
                         );
@@ -572,7 +574,8 @@ public final class AllcraftPatchServer {
                     case "timing" -> new StepSpec(
                         "title", "Timing patch delayed by " + timingDelays[step - 1] + " ticks", step * 256, timingDelays[step - 1]
                     );
-                    case "double-jump", "no-world-gen", "flying-boats", "new-class", "registry-block", "new-item", "new-particle",
+                    case "double-jump", "no-world-gen", "flying-boats", "new-class", "registry-block", "new-item", "new-particle", "new-mob",
+                        "new-music-disc", "new-keybind", "lapis-crafting-table",
                         "live-texture", "live-model", "live-sound", "live-language", "live-recipe", "live-resource-delete",
                         "asset-new-sprite", "asset-resized-sprite", "asset-animated-sprite", "asset-atlas-delete", "asset-font",
                         "asset-shader", "asset-particle", "asset-gui", "asset-live-sound", "asset-mass-model", "asset-atlas-manifest" -> new StepSpec(

@@ -3,6 +3,7 @@ package net.minecraft.client.renderer.blockentity;
 import com.google.common.collect.ImmutableMap;
 import com.mojang.blaze3d.vertex.PoseStack;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.function.Supplier;
 import net.minecraft.CrashReport;
 import net.minecraft.CrashReportCategory;
@@ -65,6 +66,39 @@ public class BlockEntityRenderDispatcher implements ResourceManagerReloadListene
         return (BlockEntityRenderer<E, S>)this.renderers.get(state.blockEntityType);
     }
 
+    /** Builds a renderer candidate first, then publishes one live dispatcher entry transactionally. */
+    public synchronized <E extends BlockEntity, S extends BlockEntityRenderState> void allcraftRegister(
+        BlockEntityType<? extends E> type, BlockEntityRendererProvider<E, S> provider
+    ) {
+        BlockEntityRendererProvider.Context context = this.createContext();
+        BlockEntityRenderer<?, ?> candidate = provider.create(context);
+        Map<BlockEntityType<?>, BlockEntityRenderer<?, ?>> previous = this.renderers;
+        Map<BlockEntityType<?>, BlockEntityRenderer<?, ?>> next = new HashMap<>(previous);
+        next.put(type, candidate);
+        this.renderers = Map.copyOf(next);
+        net.minecraft.allcraft.AllcraftRegistries.recordUndo(
+            "restore live block-entity renderer for " + net.minecraft.core.registries.BuiltInRegistries.BLOCK_ENTITY_TYPE.getKey(type),
+            () -> {
+                synchronized (BlockEntityRenderDispatcher.this) {
+                    BlockEntityRenderDispatcher.this.renderers = previous;
+                }
+            }
+        );
+    }
+
+    private BlockEntityRendererProvider.Context createContext() {
+        return new BlockEntityRendererProvider.Context(
+            this,
+            this.blockModelResolver,
+            this.itemModelResolver,
+            this.entityRenderer,
+            this.entityModelSet.get(),
+            this.font,
+            this.sprites,
+            this.playerSkinRenderCache
+        );
+    }
+
     public void prepare(Vec3 cameraPos) {
         this.cameraPos = cameraPos;
     }
@@ -110,17 +144,8 @@ public class BlockEntityRenderDispatcher implements ResourceManagerReloadListene
     }
 
     @Override
-    public void onResourceManagerReload(ResourceManager resourceManager) {
-        BlockEntityRendererProvider.Context context = new BlockEntityRendererProvider.Context(
-            this,
-            this.blockModelResolver,
-            this.itemModelResolver,
-            this.entityRenderer,
-            this.entityModelSet.get(),
-            this.font,
-            this.sprites,
-            this.playerSkinRenderCache
-        );
+    public synchronized void onResourceManagerReload(ResourceManager resourceManager) {
+        BlockEntityRendererProvider.Context context = this.createContext();
         this.renderers = BlockEntityRenderers.createEntityRenderers(context);
     }
 }

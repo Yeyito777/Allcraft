@@ -6,6 +6,7 @@ import com.mojang.logging.LogUtils;
 import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 import java.util.Map;
 import net.minecraft.allcraft.AllcraftRegistries;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.ClientAvatarEntity;
 import net.minecraft.client.model.animal.squid.SquidModel;
 import net.minecraft.client.model.geom.ModelLayers;
@@ -27,6 +28,9 @@ public class EntityRenderers {
     private static final Map<EntityType<?>, EntityRendererProvider<?>> PROVIDERS = new Object2ObjectOpenHashMap<>();
 
     public static synchronized <T extends Entity> void register(EntityType<? extends T> type, EntityRendererProvider<T> renderer) {
+        if (AllcraftRegistries.mutationAllowed()) {
+            Minecraft.getInstance().getEntityRenderDispatcher().allcraftRegister(type, renderer);
+        }
         EntityRendererProvider<?> previous = PROVIDERS.put(type, renderer);
         AllcraftRegistries.recordUndo("restore entity renderer for " + BuiltInRegistries.ENTITY_TYPE.getKey(type), () -> {
             synchronized (EntityRenderers.class) {

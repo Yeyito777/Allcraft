@@ -32,7 +32,8 @@ import org.slf4j.Logger;
 /** Server-side compiler for real source-changing Allcraft test patches. */
 public final class AllcraftPatchCompiler {
     public static final List<String> RUNTIME_TEST_NAMES = List.of(
-        "double-jump", "no-world-gen", "flying-boats", "new-class", "registry-block", "new-item", "new-particle"
+        "double-jump", "no-world-gen", "flying-boats", "new-class", "registry-block", "new-item", "new-particle", "new-mob",
+        "new-music-disc", "new-keybind", "lapis-crafting-table"
     );
     public static final List<String> RESOURCE_TEST_NAMES = List.of(
         "live-texture", "live-model", "live-sound", "live-language", "live-recipe", "live-resource-delete",
@@ -69,6 +70,10 @@ public final class AllcraftPatchCompiler {
             case "registry-block" -> registryBlockEdits(worldSource);
             case "new-item" -> newItemEdits(worldSource);
             case "new-particle" -> newParticleEdits(worldSource);
+            case "new-mob" -> newMobEdits(worldSource);
+            case "new-music-disc" -> newMusicDiscEdits(worldSource);
+            case "new-keybind" -> newKeybindEdits(worldSource);
+            case "lapis-crafting-table" -> lapisCraftingTableEdits(worldSource);
             default -> List.of();
         };
         List<ResourceEdit> resourceEdits = resourceEdits(worldSource, testName);
@@ -141,6 +146,10 @@ public final class AllcraftPatchCompiler {
             case "registry-block" -> registryBlockEdits(worldSource);
             case "new-item" -> newItemEdits(worldSource);
             case "new-particle" -> newParticleEdits(worldSource);
+            case "new-mob" -> newMobEdits(worldSource);
+            case "new-music-disc" -> newMusicDiscEdits(worldSource);
+            case "new-keybind" -> newKeybindEdits(worldSource);
+            case "lapis-crafting-table" -> lapisCraftingTableEdits(worldSource);
             default -> List.of();
         };
         List<ResourceEdit> resourceEdits = resourceEdits(worldSource, testName);
@@ -404,6 +413,502 @@ public final class AllcraftPatchCompiler {
             + "}\n";
     }
 
+    private static List<SourceEdit> newMobEdits(Path sourceRoot) throws IOException {
+        return List.of(
+            editGenerated(sourceRoot, "client/net/minecraft/allcraft/generated/ClientNewMob.java", newMobSource("ClientNewMob", "client", true)),
+            editGenerated(sourceRoot, "server/net/minecraft/allcraft/generated/ServerNewMob.java", newMobSource("ServerNewMob", "server", false))
+        );
+    }
+
+    private static String newMobSource(String className, String side, boolean client) {
+        String clientImports = client
+            ? "import net.minecraft.client.renderer.entity.CowRenderer;\nimport net.minecraft.client.renderer.entity.EntityRenderers;\n"
+            : "";
+        String clientRegistration = client ? "        EntityRenderers.register(type, CowRenderer::new);\n" : "";
+        return ("""
+            package net.minecraft.allcraft.generated;
+
+            import net.minecraft.allcraft.AllcraftRegistries;
+            %simport net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.Identifier;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.MobCategory;
+            import net.minecraft.world.entity.SpawnPlacementTypes;
+            import net.minecraft.world.entity.SpawnPlacements;
+            import net.minecraft.world.entity.ai.attributes.DefaultAttributes;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.entity.animal.cow.Cow;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.levelgen.Heightmap;
+
+            public final class %s {
+                private static final Identifier ID = Identifier.fromNamespaceAndPath("allcraft", "runtime_cow");
+                private static final ResourceKey<EntityType<?>> KEY = ResourceKey.create(Registries.ENTITY_TYPE, ID);
+                public static EntityType<RuntimeCow> type;
+
+                private %s() {
+                }
+
+                @SuppressWarnings("unchecked")
+                public static void allcraftActivate() {
+                    type = (EntityType<RuntimeCow>)(EntityType<?>)AllcraftRegistries.registerLazy(
+                        BuiltInRegistries.ENTITY_TYPE, KEY,
+                        () -> EntityType.Builder.of(RuntimeCow::new, MobCategory.CREATURE)
+                            .sized(0.9F, 1.4F).eyeHeight(1.3F).passengerAttachments(1.36875F).clientTrackingRange(10).build(KEY)
+                    );
+                    DefaultAttributes.register(type, Cow.createAttributes().build());
+                    SpawnPlacements.register(
+                        type, SpawnPlacementTypes.ON_GROUND, Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, Animal::checkAnimalSpawnRules
+                    );
+            %s        System.setProperty("allcraft.new-mob.%s", Integer.toString(BuiltInRegistries.ENTITY_TYPE.getId(type)));
+                }
+
+                public static final class RuntimeCow extends Cow {
+                    public RuntimeCow(EntityType<? extends Cow> type, Level level) {
+                        super(type, level);
+                    }
+                }
+            }
+            """).formatted(clientImports, className, className, clientRegistration, side);
+    }
+
+    private static List<SourceEdit> newKeybindEdits(Path sourceRoot) throws IOException {
+        return List.of(
+            editGenerated(
+                sourceRoot,
+                "client/net/minecraft/allcraft/generated/ClientNewKeybind.java",
+                """
+                package net.minecraft.allcraft.generated;
+
+                import com.mojang.blaze3d.platform.InputConstants;
+                import net.minecraft.allcraft.AllcraftKeyMappings;
+                import net.minecraft.client.Minecraft;
+                import net.minecraft.client.KeyMapping;
+                import net.minecraft.network.chat.Component;
+                import net.minecraft.resources.Identifier;
+
+                public final class ClientNewKeybind {
+                    public static KeyMapping mapping;
+
+                    private ClientNewKeybind() {
+                    }
+
+                    public static void allcraftActivate() {
+                        KeyMapping.Category category = AllcraftKeyMappings.category(
+                            Identifier.fromNamespaceAndPath("allcraft", "runtime")
+                        );
+                        mapping = AllcraftKeyMappings.register(
+                            "key.allcraft.runtime_launch", InputConstants.Type.KEYSYM, 75, category, ClientNewKeybind::launch
+                        );
+                        System.setProperty("allcraft.new-keybind.client", mapping.saveString());
+                    }
+
+                    private static void launch() {
+                        Minecraft minecraft = Minecraft.getInstance();
+                        if (minecraft.player != null) {
+                            minecraft.player.setDeltaMovement(minecraft.player.getDeltaMovement().add(0.0, 1.0, 0.0));
+                            minecraft.gui.hud.setOverlayMessage(Component.literal("Runtime Launch!"), false);
+                            int count = Integer.parseInt(System.getProperty("allcraft.new-keybind.activations", "0"));
+                            System.setProperty("allcraft.new-keybind.activations", Integer.toString(count + 1));
+                        }
+                    }
+                }
+                """
+            )
+        );
+    }
+
+    private static List<SourceEdit> lapisCraftingTableEdits(Path sourceRoot) throws IOException {
+        return List.of(
+            editGenerated(
+                sourceRoot,
+                "client/net/minecraft/allcraft/generated/ClientLapisCraftingTable.java",
+                lapisCraftingTableSource("ClientLapisCraftingTable", "client", true)
+            ),
+            editGenerated(
+                sourceRoot,
+                "server/net/minecraft/allcraft/generated/ServerLapisCraftingTable.java",
+                lapisCraftingTableSource("ServerLapisCraftingTable", "server", false)
+            )
+        );
+    }
+
+    private static String lapisCraftingTableSource(String className, String side, boolean client) {
+        String clientImports = client
+            ? """
+            import net.minecraft.client.gui.GuiGraphicsExtractor;
+            import net.minecraft.client.gui.screens.MenuScreens;
+            import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+            import net.minecraft.client.renderer.RenderPipelines;
+            """
+            : "";
+        String clientTypes = client
+            ? """
+
+                public static final class RuntimeScreen extends AbstractContainerScreen<RuntimeMenu> {
+                    private static final Identifier TEXTURE = Identifier.withDefaultNamespace("textures/gui/container/crafting_table.png");
+
+                    public RuntimeScreen(RuntimeMenu menu, Inventory inventory, Component title) {
+                        super(menu, inventory, title);
+                    }
+
+                    @Override
+                    public void extractBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float a) {
+                        super.extractBackground(graphics, mouseX, mouseY, a);
+                        graphics.blit(
+                            RenderPipelines.GUI_TEXTURED, TEXTURE, this.leftPos, this.topPos,
+                            0.0F, 0.0F, this.imageWidth, this.imageHeight, 256, 256
+                        );
+                    }
+                }
+            """
+            : "";
+        String clientRegistration = client ? "        MenuScreens.register(menuType, RuntimeScreen::new);\n" : "";
+        return ("""
+            package net.minecraft.allcraft.generated;
+
+            import com.mojang.serialization.MapCodec;
+            import java.util.List;
+            import java.util.Optional;
+            import java.util.Set;
+            import net.minecraft.allcraft.AllcraftRegistries;
+            %simport net.minecraft.core.BlockPos;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.network.RegistryFriendlyByteBuf;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.network.codec.StreamCodec;
+            import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
+            import net.minecraft.resources.Identifier;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.MenuProvider;
+            import net.minecraft.world.entity.player.Inventory;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.flag.FeatureFlags;
+            import net.minecraft.world.inventory.AbstractContainerMenu;
+            import net.minecraft.world.inventory.AbstractCraftingMenu;
+            import net.minecraft.world.inventory.ContainerLevelAccess;
+            import net.minecraft.world.inventory.CraftingContainer;
+            import net.minecraft.world.inventory.MenuType;
+            import net.minecraft.world.inventory.RecipeBookType;
+            import net.minecraft.world.inventory.ResultContainer;
+            import net.minecraft.world.inventory.Slot;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.CraftingInput;
+            import net.minecraft.world.item.crafting.CraftingRecipe;
+            import net.minecraft.world.item.crafting.CustomRecipe;
+            import net.minecraft.world.item.crafting.RecipeHolder;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.Blocks;
+            import net.minecraft.world.level.block.EntityBlock;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.phys.BlockHitResult;
+
+            public final class %s {
+                private static final Identifier ID = Identifier.fromNamespaceAndPath("allcraft", "lapis_crafting_table");
+                private static final Identifier RECIPE_ID = Identifier.fromNamespaceAndPath("allcraft", "lapis_table");
+                private static final ResourceKey<Block> BLOCK_KEY = ResourceKey.create(Registries.BLOCK, ID);
+                private static final ResourceKey<Item> ITEM_KEY = ResourceKey.create(Registries.ITEM, ID);
+                private static final ResourceKey<BlockEntityType<?>> BLOCK_ENTITY_KEY = ResourceKey.create(Registries.BLOCK_ENTITY_TYPE, ID);
+                private static final ResourceKey<MenuType<?>> MENU_KEY = ResourceKey.create(Registries.MENU, ID);
+                private static final ResourceKey<RecipeType<?>> RECIPE_TYPE_KEY = ResourceKey.create(Registries.RECIPE_TYPE, RECIPE_ID);
+                private static final ResourceKey<RecipeSerializer<?>> RECIPE_SERIALIZER_KEY = ResourceKey.create(Registries.RECIPE_SERIALIZER, RECIPE_ID);
+                public static Block block;
+                public static Item item;
+                public static BlockEntityType<RuntimeBlockEntity> blockEntityType;
+                public static MenuType<RuntimeMenu> menuType;
+                public static RecipeType<CraftingRecipe> recipeType;
+                public static RecipeSerializer<RuntimeRecipe> recipeSerializer;
+
+                private %s() {
+                }
+
+                @SuppressWarnings("unchecked")
+                public static void allcraftActivate() {
+                    block = AllcraftRegistries.registerLazy(
+                        BuiltInRegistries.BLOCK, BLOCK_KEY,
+                        () -> new RuntimeBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.CRAFTING_TABLE).setId(BLOCK_KEY))
+                    );
+                    blockEntityType = (BlockEntityType<RuntimeBlockEntity>)(BlockEntityType<?>)AllcraftRegistries.registerLazy(
+                        BuiltInRegistries.BLOCK_ENTITY_TYPE, BLOCK_ENTITY_KEY,
+                        () -> new BlockEntityType<>(RuntimeBlockEntity::new, Set.of(block))
+                    );
+                    menuType = (MenuType<RuntimeMenu>)(MenuType<?>)AllcraftRegistries.registerLazy(
+                        BuiltInRegistries.MENU, MENU_KEY,
+                        () -> new MenuType<>(RuntimeMenu::new, FeatureFlags.VANILLA_SET)
+                    );
+                    item = AllcraftRegistries.registerLazy(
+                        BuiltInRegistries.ITEM, ITEM_KEY,
+                        () -> new BlockItem(block, new Item.Properties().setId(ITEM_KEY).useBlockDescriptionPrefix())
+                    );
+                    recipeType = (RecipeType<CraftingRecipe>)(RecipeType<?>)AllcraftRegistries.registerLazy(
+                        BuiltInRegistries.RECIPE_TYPE, RECIPE_TYPE_KEY, () -> new RecipeType<CraftingRecipe>() {
+                            @Override
+                            public String toString() {
+                                return RECIPE_ID.toString();
+                            }
+                        }
+                    );
+                    recipeSerializer = (RecipeSerializer<RuntimeRecipe>)(RecipeSerializer<?>)AllcraftRegistries.registerLazy(
+                        BuiltInRegistries.RECIPE_SERIALIZER, RECIPE_SERIALIZER_KEY,
+                        () -> new RecipeSerializer<>(RuntimeRecipe.MAP_CODEC, RuntimeRecipe.STREAM_CODEC)
+                    );
+            %s        System.setProperty("allcraft.lapis-crafting-table.%s", Integer.toString(BuiltInRegistries.MENU.getId(menuType)));
+                }
+
+                public static final class RuntimeBlock extends Block implements EntityBlock {
+                    public RuntimeBlock(BlockBehaviour.Properties properties) {
+                        super(properties);
+                    }
+
+                    @Override
+                    public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
+                        return new RuntimeBlockEntity(pos, state);
+                    }
+
+                    @Override
+                    protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {
+                        if (!level.isClientSide() && level.getBlockEntity(pos) instanceof RuntimeBlockEntity blockEntity) {
+                            player.openMenu(blockEntity);
+                        }
+                        return InteractionResult.SUCCESS;
+                    }
+                }
+
+                public static final class RuntimeBlockEntity extends BlockEntity implements MenuProvider {
+                    public RuntimeBlockEntity(BlockPos pos, BlockState state) {
+                        super(blockEntityType, pos, state);
+                    }
+
+                    @Override
+                    public Component getDisplayName() {
+                        return Component.translatable("container.allcraft.lapis_crafting_table");
+                    }
+
+                    @Override
+                    public AbstractContainerMenu createMenu(int containerId, Inventory inventory, Player player) {
+                        return new RuntimeMenu(containerId, inventory, ContainerLevelAccess.create(player.level(), this.getBlockPos()));
+                    }
+                }
+
+                public static final class RuntimeMenu extends AbstractCraftingMenu {
+                    private final ContainerLevelAccess access;
+                    private final Player player;
+                    private boolean placingRecipe;
+
+                    public RuntimeMenu(int containerId, Inventory inventory) {
+                        this(containerId, inventory, ContainerLevelAccess.NULL);
+                    }
+
+                    public RuntimeMenu(int containerId, Inventory inventory, ContainerLevelAccess access) {
+                        super(menuType, containerId, 3, 3);
+                        this.access = access;
+                        this.player = inventory.player;
+                        this.addResultSlot(this.player, 124, 35);
+                        this.addCraftingGridSlots(30, 17);
+                        this.addStandardInventorySlots(inventory, 8, 84);
+                    }
+
+                    private static void updateResult(
+                        AbstractContainerMenu menu, ServerLevel level, Player player, CraftingContainer inputSlots, ResultContainer resultSlots,
+                        RecipeHolder<CraftingRecipe> recipeHint
+                    ) {
+                        CraftingInput input = inputSlots.asCraftInput();
+                        ServerPlayer serverPlayer = (ServerPlayer)player;
+                        ItemStack result = ItemStack.EMPTY;
+                        Optional<RecipeHolder<CraftingRecipe>> recipe = level.getServer().getRecipeManager()
+                            .getRecipeFor(recipeType, input, level, recipeHint);
+                        if (recipe.isPresent() && resultSlots.setRecipeUsed(serverPlayer, recipe.get())) {
+                            result = recipe.get().value().assemble(input);
+                        }
+                        resultSlots.setItem(0, result);
+                        menu.setRemoteSlot(0, result);
+                        serverPlayer.connection.send(new ClientboundContainerSetSlotPacket(menu.containerId, menu.incrementStateId(), 0, result));
+                    }
+
+                    @Override
+                    public void slotsChanged(Container container) {
+                        if (!this.placingRecipe) {
+                            this.access.execute((level, pos) -> {
+                                if (level instanceof ServerLevel serverLevel) {
+                                    updateResult(this, serverLevel, this.player, this.craftSlots, this.resultSlots, null);
+                                }
+                            });
+                        }
+                    }
+
+                    @Override
+                    protected void beginPlacingRecipe() {
+                        this.placingRecipe = true;
+                    }
+
+                    @Override
+                    protected void finishPlacingRecipe(ServerLevel level, RecipeHolder<CraftingRecipe> recipe) {
+                        this.placingRecipe = false;
+                        updateResult(this, level, this.player, this.craftSlots, this.resultSlots, recipe);
+                    }
+
+                    @Override
+                    public void removed(Player player) {
+                        super.removed(player);
+                        this.access.execute((level, pos) -> this.clearContainer(player, this.craftSlots));
+                    }
+
+                    @Override
+                    public boolean stillValid(Player player) {
+                        return stillValid(this.access, player, block);
+                    }
+
+                    @Override
+                    public ItemStack quickMoveStack(Player player, int slotIndex) {
+                        ItemStack clicked = ItemStack.EMPTY;
+                        Slot slot = this.slots.get(slotIndex);
+                        if (slot != null && slot.hasItem()) {
+                            ItemStack stack = slot.getItem();
+                            clicked = stack.copy();
+                            if (slotIndex == 0) {
+                                stack.getItem().onCraftedBy(stack, player);
+                                if (!this.moveItemStackTo(stack, 10, 46, true)) return ItemStack.EMPTY;
+                                slot.onQuickCraft(stack, clicked);
+                            } else if (slotIndex >= 10 && slotIndex < 46) {
+                                if (!this.moveItemStackTo(stack, 1, 10, false)) {
+                                    if (slotIndex < 37) {
+                                        if (!this.moveItemStackTo(stack, 37, 46, false)) return ItemStack.EMPTY;
+                                    } else if (!this.moveItemStackTo(stack, 10, 37, false)) return ItemStack.EMPTY;
+                                }
+                            } else if (!this.moveItemStackTo(stack, 10, 46, false)) return ItemStack.EMPTY;
+                            if (stack.isEmpty()) slot.setByPlayer(ItemStack.EMPTY); else slot.setChanged();
+                            if (stack.getCount() == clicked.getCount()) return ItemStack.EMPTY;
+                            slot.onTake(player, stack);
+                            if (slotIndex == 0) player.drop(stack, false);
+                        }
+                        return clicked;
+                    }
+
+                    @Override
+                    public boolean canTakeItemForPickAll(ItemStack carried, Slot target) {
+                        return target.container != this.resultSlots && super.canTakeItemForPickAll(carried, target);
+                    }
+
+                    @Override
+                    public Slot getResultSlot() {
+                        return this.slots.get(0);
+                    }
+
+                    @Override
+                    public List<Slot> getInputGridSlots() {
+                        return this.slots.subList(1, 10);
+                    }
+
+                    @Override
+                    public RecipeBookType getRecipeBookType() {
+                        return RecipeBookType.CRAFTING;
+                    }
+
+                    @Override
+                    protected Player owner() {
+                        return this.player;
+                    }
+                }
+
+                public static final class RuntimeRecipe extends CustomRecipe {
+                    public static final RuntimeRecipe INSTANCE = new RuntimeRecipe();
+                    public static final MapCodec<RuntimeRecipe> MAP_CODEC = MapCodec.unit(INSTANCE);
+                    public static final StreamCodec<RegistryFriendlyByteBuf, RuntimeRecipe> STREAM_CODEC = StreamCodec.unit(INSTANCE);
+
+                    @Override
+                    public boolean matches(CraftingInput input, Level level) {
+                        return input.ingredientCount() == 1 && input.items().stream().anyMatch(stack -> stack.is(Items.LAPIS_LAZULI));
+                    }
+
+                    @Override
+                    public ItemStack assemble(CraftingInput input) {
+                        return new ItemStack(Items.DIAMOND);
+                    }
+
+                    @Override
+                    public RecipeSerializer<RuntimeRecipe> getSerializer() {
+                        return recipeSerializer;
+                    }
+
+                    @Override
+                    public RecipeType<CraftingRecipe> getType() {
+                        return recipeType;
+                    }
+                }
+            %s}
+            """).formatted(clientImports, className, className, clientRegistration, side, clientTypes);
+    }
+
+    private static List<SourceEdit> newMusicDiscEdits(Path sourceRoot) throws IOException {
+        return List.of(
+            editGenerated(
+                sourceRoot,
+                "client/net/minecraft/allcraft/generated/ClientMusicDisc.java",
+                newMusicDiscSource("ClientMusicDisc", "client")
+            ),
+            editGenerated(
+                sourceRoot,
+                "server/net/minecraft/allcraft/generated/ServerMusicDisc.java",
+                newMusicDiscSource("ServerMusicDisc", "server")
+            )
+        );
+    }
+
+    private static String newMusicDiscSource(String className, String side) {
+        return "package net.minecraft.allcraft.generated;\n\n"
+            + "import net.minecraft.allcraft.AllcraftRegistries;\n"
+            + "import net.minecraft.core.Holder;\n"
+            + "import net.minecraft.core.registries.BuiltInRegistries;\n"
+            + "import net.minecraft.core.registries.Registries;\n"
+            + "import net.minecraft.network.chat.Component;\n"
+            + "import net.minecraft.resources.Identifier;\n"
+            + "import net.minecraft.resources.ResourceKey;\n"
+            + "import net.minecraft.sounds.SoundEvent;\n"
+            + "import net.minecraft.world.item.Item;\n"
+            + "import net.minecraft.world.item.JukeboxSong;\n\n"
+            + "public final class " + className + " {\n"
+            + "    private static final Identifier ITEM_ID = Identifier.fromNamespaceAndPath(\"allcraft\", \"runtime_music_disc\");\n"
+            + "    private static final Identifier SOUND_ID = Identifier.fromNamespaceAndPath(\"allcraft\", \"music_disc.runtime\");\n"
+            + "    private static final ResourceKey<Item> ITEM_KEY = ResourceKey.create(Registries.ITEM, ITEM_ID);\n"
+            + "    private static final ResourceKey<SoundEvent> SOUND_KEY = ResourceKey.create(Registries.SOUND_EVENT, SOUND_ID);\n"
+            + "    private static final ResourceKey<JukeboxSong> SONG_KEY = ResourceKey.create(Registries.JUKEBOX_SONG, ITEM_ID);\n"
+            + "    public static Item item;\n\n"
+            + "    private " + className + "() {\n"
+            + "    }\n\n"
+            + "    public static void allcraftActivate() {\n"
+            + "        AllcraftRegistries.registerLazy(\n"
+            + "            BuiltInRegistries.SOUND_EVENT, SOUND_KEY, () -> SoundEvent.createVariableRangeEvent(SOUND_ID)\n"
+            + "        );\n"
+            + "        Holder<SoundEvent> soundHolder = BuiltInRegistries.SOUND_EVENT.get(SOUND_KEY).orElseThrow();\n"
+            + "        AllcraftRegistries.registerLazy(\n"
+            + "            Registries.JUKEBOX_SONG, SONG_KEY,\n"
+            + "            () -> new JukeboxSong(soundHolder, Component.literal(\"Runtime Symphony\"), 6.0F, 14)\n"
+            + "        );\n"
+            + "        item = AllcraftRegistries.registerLazy(\n"
+            + "            BuiltInRegistries.ITEM, ITEM_KEY,\n"
+            + "            () -> new Item(new Item.Properties().setId(ITEM_KEY).stacksTo(1).jukeboxPlayable(SONG_KEY))\n"
+            + "        );\n"
+            + "        System.setProperty(\"allcraft.new-music-disc." + side + "\", Integer.toString(BuiltInRegistries.ITEM.getId(item)));\n"
+            + "    }\n"
+            + "}\n";
+    }
+
     private static String registryBlockSource(String className, String side) {
         return "package net.minecraft.allcraft.generated;\n\n"
             + "import net.minecraft.allcraft.AllcraftRegistries;\n"
@@ -635,6 +1140,103 @@ public final class AllcraftPatchCompiler {
                     "{\n  \"textures\": [\"allcraft:runtime_spark\"]\n}\n".getBytes(StandardCharsets.UTF_8)
                 )
             );
+            case "new-mob" -> List.of(languageEntry(sourceRoot, "entity.allcraft.runtime_cow", "Runtime Cow"));
+            case "new-keybind" -> List.of(
+                languageEntries(
+                    sourceRoot,
+                    Map.of("key.allcraft.runtime_launch", "Runtime Launch", "key.category.allcraft.runtime", "Allcraft Runtime")
+                )
+            );
+            case "lapis-crafting-table" -> {
+                byte[] tableRecipe = ("{\n"
+                        + "  \"type\": \"minecraft:crafting_shaped\",\n"
+                        + "  \"category\": \"misc\",\n"
+                        + "  \"pattern\": [\"LLL\", \"LCL\", \"LLL\"],\n"
+                        + "  \"key\": {\"L\": \"minecraft:lapis_lazuli\", \"C\": \"minecraft:crafting_table\"},\n"
+                        + "  \"result\": {\"count\": 1, \"id\": \"allcraft:lapis_crafting_table\"}\n"
+                        + "}\n")
+                    .getBytes(StandardCharsets.UTF_8);
+                byte[] workstationRecipe = "{\n  \"type\": \"allcraft:lapis_table\"\n}\n".getBytes(StandardCharsets.UTF_8);
+                yield List.of(
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/blockstates/lapis_crafting_table.json",
+                        "{\n  \"variants\": {\"\": {\"model\": \"allcraft:block/lapis_crafting_table\"}}\n}\n"
+                            .getBytes(StandardCharsets.UTF_8)
+                    ),
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/models/block/lapis_crafting_table.json",
+                        cubeAllModel("minecraft:block/lapis_block")
+                    ),
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/items/lapis_crafting_table.json",
+                        "{\n  \"model\": {\"type\": \"minecraft:model\", \"model\": \"allcraft:block/lapis_crafting_table\"}\n}\n"
+                            .getBytes(StandardCharsets.UTF_8)
+                    ),
+                    languageEntries(
+                        sourceRoot,
+                        Map.of(
+                            "block.allcraft.lapis_crafting_table", "Lapis Crafting Table",
+                            "container.allcraft.lapis_crafting_table", "Lapis Crafting Table"
+                        )
+                    ),
+                    resourceEditGenerated(sourceRoot, "client/data/allcraft/recipe/lapis_crafting_table.json", tableRecipe),
+                    resourceEditGenerated(sourceRoot, "server/data/allcraft/recipe/lapis_crafting_table.json", tableRecipe),
+                    resourceEditGenerated(sourceRoot, "client/data/allcraft/recipe/lapis_table_diamond.json", workstationRecipe),
+                    resourceEditGenerated(sourceRoot, "server/data/allcraft/recipe/lapis_table_diamond.json", workstationRecipe)
+                );
+            }
+            case "new-music-disc" -> {
+                byte[] recipe = ("{\n"
+                        + "  \"type\": \"minecraft:crafting_shapeless\",\n"
+                        + "  \"category\": \"misc\",\n"
+                        + "  \"ingredients\": [\"minecraft:diamond\", \"minecraft:note_block\"],\n"
+                        + "  \"result\": {\"count\": 1, \"id\": \"allcraft:runtime_music_disc\"}\n"
+                        + "}\n")
+                    .getBytes(StandardCharsets.UTF_8);
+                yield List.of(
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/sounds.json",
+                        ("{\n"
+                                + "  \"music_disc.runtime\": {\n"
+                                + "    \"sounds\": [{\"name\": \"allcraft:records/runtime_music_disc\", \"stream\": true}]\n"
+                                + "  }\n"
+                                + "}\n")
+                            .getBytes(StandardCharsets.UTF_8)
+                    ),
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/sounds/records/runtime_music_disc.ogg",
+                        Files.readAllBytes(sourceRoot.resolve("client/assets/minecraft/sounds/event/mob_effects/bad_omen.ogg"))
+                    ),
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/textures/item/runtime_music_disc.png",
+                        checkerTexture(16, 16, 0xFF101020, 0xFF30E0A0)
+                    ),
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/models/item/runtime_music_disc.json",
+                        ("{\n"
+                                + "  \"parent\": \"minecraft:item/generated\",\n"
+                                + "  \"textures\": {\"layer0\": \"allcraft:item/runtime_music_disc\"}\n"
+                                + "}\n")
+                            .getBytes(StandardCharsets.UTF_8)
+                    ),
+                    resourceEditGenerated(
+                        sourceRoot,
+                        "client/assets/allcraft/items/runtime_music_disc.json",
+                        "{\n  \"model\": {\"type\": \"minecraft:model\", \"model\": \"allcraft:item/runtime_music_disc\"}\n}\n"
+                            .getBytes(StandardCharsets.UTF_8)
+                    ),
+                    languageEntry(sourceRoot, "item.allcraft.runtime_music_disc", "Runtime Music Disc"),
+                    resourceEditGenerated(sourceRoot, "client/data/allcraft/recipe/runtime_music_disc.json", recipe),
+                    resourceEditGenerated(sourceRoot, "server/data/allcraft/recipe/runtime_music_disc.json", recipe)
+                );
+            }
             case "registry-block" -> {
                 byte[] recipe = ("{\n"
                         + "  \"type\": \"minecraft:crafting_shapeless\",\n"
@@ -730,26 +1332,40 @@ public final class AllcraftPatchCompiler {
     }
 
     private static ResourceEdit languageEntry(Path sourceRoot, String key, String value) throws IOException {
+        return languageEntries(sourceRoot, Map.of(key, value));
+    }
+
+    private static ResourceEdit languageEntries(Path sourceRoot, Map<String, String> entries) throws IOException {
         String relative = "client/assets/allcraft/lang/en_us.json";
         Path path = sourceRoot.resolve(relative);
         if (!Files.isRegularFile(path)) {
-            return resourceEditGenerated(
-                sourceRoot, relative, ("{\n  \"" + key + "\": \"" + value + "\"\n}\n").getBytes(StandardCharsets.UTF_8)
-            );
+            StringBuilder language = new StringBuilder("{\n");
+            int index = 0;
+            for (Map.Entry<String, String> entry : entries.entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
+                if (index++ > 0) {
+                    language.append(",\n");
+                }
+                language.append("  \"").append(entry.getKey()).append("\": \"").append(entry.getValue()).append('"');
+            }
+            language.append("\n}\n");
+            return resourceEditGenerated(sourceRoot, relative, language.toString().getBytes(StandardCharsets.UTF_8));
         }
         return resourceEditExisting(sourceRoot, relative, bytes -> {
             String language = new String(bytes, StandardCharsets.UTF_8);
-            if (language.contains("\"" + key + "\"")) {
-                return bytes;
-            }
             int end = language.lastIndexOf('}');
             if (end < 0) {
                 throw new IllegalArgumentException("invalid allcraft language JSON");
             }
             String prefix = language.substring(0, end).stripTrailing();
             boolean hasEntries = prefix.lastIndexOf('{') < prefix.length() - 1;
-            String updated = prefix + (hasEntries ? "," : "") + "\n  \"" + key + "\": \"" + value + "\"\n}\n";
-            return updated.getBytes(StandardCharsets.UTF_8);
+            StringBuilder updated = new StringBuilder(prefix);
+            for (Map.Entry<String, String> entry : entries.entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
+                if (!language.contains("\"" + entry.getKey() + "\"")) {
+                    updated.append(hasEntries ? "," : "").append("\n  \"").append(entry.getKey()).append("\": \"").append(entry.getValue()).append('"');
+                    hasEntries = true;
+                }
+            }
+            return updated.append("\n}\n").toString().getBytes(StandardCharsets.UTF_8);
         });
     }
 
@@ -891,6 +1507,12 @@ public final class AllcraftPatchCompiler {
             case "registry-block" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientRegistryBlock.java"));
             case "new-item" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewItem.java"));
             case "new-particle" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewParticle.java"));
+            case "new-mob" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewMob.java"));
+            case "new-music-disc" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientMusicDisc.java"));
+            case "new-keybind" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewKeybind.java"));
+            case "lapis-crafting-table" -> List.of(
+                sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientLapisCraftingTable.java")
+            );
             default -> List.of();
         };
     }
@@ -902,6 +1524,11 @@ public final class AllcraftPatchCompiler {
             case "registry-block" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerRegistryBlock.java"));
             case "new-item" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerNewItem.java"));
             case "new-particle" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerNewParticle.java"));
+            case "new-mob" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerNewMob.java"));
+            case "new-music-disc" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerMusicDisc.java"));
+            case "lapis-crafting-table" -> List.of(
+                sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerLapisCraftingTable.java")
+            );
             default -> List.of();
         };
     }
@@ -913,6 +1540,10 @@ public final class AllcraftPatchCompiler {
             case "registry-block" -> List.of("net.minecraft.allcraft.generated.ClientRegistryBlock");
             case "new-item" -> List.of("net.minecraft.allcraft.generated.ClientNewItem");
             case "new-particle" -> List.of("net.minecraft.allcraft.generated.ClientNewParticle");
+            case "new-mob" -> List.of("net.minecraft.allcraft.generated.ClientNewMob");
+            case "new-music-disc" -> List.of("net.minecraft.allcraft.generated.ClientMusicDisc");
+            case "new-keybind" -> List.of("net.minecraft.allcraft.generated.ClientNewKeybind");
+            case "lapis-crafting-table" -> List.of("net.minecraft.allcraft.generated.ClientLapisCraftingTable");
             default -> List.of();
         };
     }
@@ -923,6 +1554,9 @@ public final class AllcraftPatchCompiler {
             case "registry-block" -> List.of("net.minecraft.allcraft.generated.ServerRegistryBlock");
             case "new-item" -> List.of("net.minecraft.allcraft.generated.ServerNewItem");
             case "new-particle" -> List.of("net.minecraft.allcraft.generated.ServerNewParticle");
+            case "new-mob" -> List.of("net.minecraft.allcraft.generated.ServerNewMob");
+            case "new-music-disc" -> List.of("net.minecraft.allcraft.generated.ServerMusicDisc");
+            case "lapis-crafting-table" -> List.of("net.minecraft.allcraft.generated.ServerLapisCraftingTable");
             default -> List.of();
         };
     }
@@ -936,6 +1570,10 @@ public final class AllcraftPatchCompiler {
             case "registry-block" -> "Craft one dirt or run /give @s allcraft:runtime_block, then place the new synchronized block";
             case "new-item" -> "Craft amethyst plus redstone or run /give @s allcraft:runtime_crystal; the new item should have its live model";
             case "new-particle" -> "Run /particle allcraft:runtime_spark ~ ~1 ~ 0.5 0.5 0.5 0.02 100; the new orange/yellow particle should render";
+            case "new-mob" -> "Run /summon allcraft:runtime_cow; the new synchronized mob should spawn and render as a cow";
+            case "new-music-disc" -> "Craft a diamond plus note block or run /give @s allcraft:runtime_music_disc, then play it in a jukebox";
+            case "new-keybind" -> "Open Controls to find Allcraft Runtime > Runtime Launch, then press K in-game to launch upward";
+            case "lapis-crafting-table" -> "Craft or /give @s allcraft:lapis_crafting_table, open it, and craft one lapis lazuli into one diamond";
             case "live-texture" -> "Dirt textures should become a magenta-and-black checkerboard immediately";
             case "live-model" -> "Dirt blocks should immediately render with the diamond-block model texture";
             case "live-sound" -> "The automatic experience-orb preview should play the ominous-effect sound";

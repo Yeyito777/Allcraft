@@ -119,7 +119,17 @@ public final class AllcraftRuntime {
 
     /** Compatibility entrypoint: stage, publish, migrate, and finalize one transaction. */
     public static synchronized ApplyResult apply(Path artifact, String expectedSha256) throws Exception {
+        return apply(artifact, expectedSha256, null);
+    }
+
+    /** Replays an artifact against a selected live world registry layer. */
+    public static synchronized ApplyResult apply(
+        Path artifact, String expectedSha256, net.minecraft.core.RegistryAccess registryAccess
+    ) throws Exception {
         Transaction transaction = stage(artifact, expectedSha256);
+        if (registryAccess != null) {
+            transaction.registryAccess(registryAccess);
+        }
         try {
             ApplyResult result = transaction.publish();
             transaction.finish();
@@ -493,13 +503,29 @@ public final class AllcraftRuntime {
     }
 
     private static void verifyClasses(Map<String, byte[]> classes) throws IOException {
-        ClassFile classFile = ClassFile.of();
+        ClassFile parser = ClassFile.of();
+        Map<String, ClassModel> models = new LinkedHashMap<>();
+        java.util.Set<java.lang.constant.ClassDesc> interfaces = new java.util.HashSet<>();
+        Map<java.lang.constant.ClassDesc, java.lang.constant.ClassDesc> superclasses = new java.util.HashMap<>();
         for (Map.Entry<String, byte[]> entry : classes.entrySet()) {
             byte[] bytes = entry.getValue();
             if (bytes.length < 4 || bytes[0] != (byte)0xCA || bytes[1] != (byte)0xFE || bytes[2] != (byte)0xBA || bytes[3] != (byte)0xBE) {
                 throw new IOException("Invalid class-file magic for " + entry.getKey());
             }
-            List<java.lang.VerifyError> errors = classFile.verify(bytes);
+            ClassModel model = parser.parse(bytes);
+            models.put(entry.getKey(), model);
+            java.lang.constant.ClassDesc descriptor = model.thisClass().asSymbol();
+            if (model.flags().has(java.lang.reflect.AccessFlag.INTERFACE)) {
+                interfaces.add(descriptor);
+            } else {
+                model.superclass().ifPresent(parent -> superclasses.put(descriptor, parent.asSymbol()));
+            }
+        }
+        java.lang.classfile.ClassHierarchyResolver resolver = java.lang.classfile.ClassHierarchyResolver.of(interfaces, superclasses)
+            .orElse(java.lang.classfile.ClassHierarchyResolver.defaultResolver());
+        ClassFile verifier = ClassFile.of(ClassFile.ClassHierarchyResolverOption.of(resolver));
+        for (Map.Entry<String, ClassModel> entry : models.entrySet()) {
+            List<java.lang.VerifyError> errors = verifier.verify(entry.getValue());
             if (!errors.isEmpty()) {
                 throw new IOException("Class-file verification failed for " + entry.getKey() + ": " + errors.getFirst());
             }
@@ -792,6 +818,10 @@ public final class AllcraftRuntime {
 
         public synchronized void expectRegistryPlan(String plan) {
             this.registryTransaction.expect(plan);
+        }
+
+        public synchronized void registryAccess(net.minecraft.core.RegistryAccess registryAccess) {
+            this.registryTransaction.registryAccess(registryAccess);
         }
 
         public synchronized String registryPlan() {

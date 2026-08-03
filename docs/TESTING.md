@@ -27,6 +27,10 @@ The runtime tests each compile and activate one real source/bytecode patch:
 | `registry-block` | Adds a synchronized block/item with stable registry and block-state IDs | Craft one dirt or run `/give @s allcraft:runtime_block`, then place it |
 | `new-item` | Adds a synchronized item, component initializer, model, texture, language, and recipe | Craft amethyst plus redstone or run `/give @s allcraft:runtime_crystal` |
 | `new-particle` | Adds a synchronized particle type, wire ID, client provider, description, and atlas sprite | Run `/particle allcraft:runtime_spark ~ ~1 ~ 0.5 0.5 0.5 0.02 100` |
+| `new-mob` | Adds a synchronized entity type and class, default attributes, spawn placement, and transactionally published live renderer | Run `/summon allcraft:runtime_cow` |
+| `new-music-disc` | Adds a sound event, dynamic jukebox-song entry, item/components, streamed audio, model, language, and recipe | Craft diamond plus note block or run `/give @s allcraft:runtime_music_disc`, then use a jukebox |
+| `new-keybind` | Adds a world-scoped persistent key, custom category, controls entry, conflict handling, callback, rollback, and replay | Find **Allcraft Runtime → Runtime Launch** in Controls; press K in-game |
+| `lapis-crafting-table` | Adds a block/item, block entity, menu, screen, custom recipe type/serializer, model, language, and two data recipes | Craft or give `allcraft:lapis_crafting_table`; one lapis in its grid produces one diamond |
 
 The resource tests edit the world's authoritative source, stream resource/data overlays, reload them without a loading screen, and verify the active bytes:
 
@@ -72,6 +76,8 @@ For the non-rendering production-pipeline/JVM regression, run:
 ```bash
 tests/registries/run.sh
 tests/code-generality/run.sh
+tests/jvm/run.sh jvm/linux-x64
+tests/jvm/minecraft-smoke.sh jvm/linux-x64 new-mob new-music-disc new-keybind lapis-crafting-table
 ```
 
-The registry regression covers server/client ID plans, generic mutation operations, intrusive holders, rollback, process-lifetime retirement, replay, and plan-conflict rejection.
+The registry regression covers server/client ID plans, built-in and dynamic-registry mutation, intrusive holders, rollback, process-lifetime retirement, replay, and plan-conflict rejection. The Minecraft smoke harness compiles, streams, activates, acknowledges, exits, and replays each selected fixture; the table above lists the remaining visual/interactive checks.

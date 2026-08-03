@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
+import net.minecraft.allcraft.AllcraftRegistries;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.Registry;
@@ -16,16 +17,39 @@ import net.minecraft.resources.ResourceKey;
 public class DataComponentInitializers {
    private final List<DataComponentInitializers.InitializerEntry<?>> initializers = new ArrayList<>();
 
-   public <T> void add(final ResourceKey<T> key, final DataComponentInitializers.Initializer<T> initializer) {
-      this.initializers.add(new DataComponentInitializers.InitializerEntry<>(key, initializer));
+   public synchronized <T> void add(final ResourceKey<T> key, final DataComponentInitializers.Initializer<T> initializer) {
+      DataComponentInitializers.InitializerEntry<T> entry = new DataComponentInitializers.InitializerEntry<>(key, initializer);
+      this.initializers.add(entry);
+      if (AllcraftRegistries.mutationAllowed()) {
+         AllcraftRegistries.recordRetainedUndo(
+            "remove runtime component initializer " + key,
+            () -> {
+               synchronized (DataComponentInitializers.this) {
+                  DataComponentInitializers.this.initializers.remove(entry);
+               }
+            },
+            () -> entry.active = false
+         );
+      }
+   }
+
+   public synchronized void reactivate(final ResourceKey<?> key) {
+      for (DataComponentInitializers.InitializerEntry<?> entry : this.initializers) {
+            if (entry.key.equals(key) && !entry.active) {
+            entry.active = true;
+            AllcraftRegistries.recordUndo("retire runtime component initializer " + key, () -> entry.active = false);
+         }
+      }
    }
 
    private Map<ResourceKey<?>, DataComponentMap.Builder> runInitializers(final HolderLookup.Provider context) {
       Map<ResourceKey<?>, DataComponentMap.Builder> results = new HashMap<>();
 
       for (DataComponentInitializers.InitializerEntry<?> initializer : this.initializers) {
-         DataComponentMap.Builder builder = results.computeIfAbsent(initializer.key, k -> DataComponentMap.builder());
-         initializer.run(builder, context);
+         if (initializer.active) {
+            DataComponentMap.Builder builder = results.computeIfAbsent(initializer.key, k -> DataComponentMap.builder());
+            initializer.run(builder, context);
+         }
       }
 
       return results;
@@ -120,7 +144,16 @@ public class DataComponentInitializers {
       }
    }
 
-   private record InitializerEntry<T>(ResourceKey<T> key, DataComponentInitializers.Initializer<T> initializer) {
+   private static final class InitializerEntry<T> {
+      private final ResourceKey<T> key;
+      private final DataComponentInitializers.Initializer<T> initializer;
+      private boolean active = true;
+
+      private InitializerEntry(final ResourceKey<T> key, final DataComponentInitializers.Initializer<T> initializer) {
+         this.key = key;
+         this.initializer = initializer;
+      }
+
       public void run(final DataComponentMap.Builder components, final HolderLookup.Provider context) {
          this.initializer.run(components, context, this.key);
       }
