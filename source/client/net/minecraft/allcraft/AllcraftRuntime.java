@@ -73,12 +73,14 @@ public final class AllcraftRuntime {
         Map<String, byte[]> parentDefinitions = readClasses(normalized, "META-INF/allcraft-previous/", true);
         Set<String> addedClasses = Set.copyOf(strings(descriptor, "addedClasses"));
         Set<String> deletedClasses = Set.copyOf(strings(descriptor, "deletedClasses"));
+        Map<String, String> sharedClasses = sharedClasses(descriptor);
         Hooks hooks = Hooks.from(descriptor.has("hooks") ? descriptor.getAsJsonObject("hooks") : new JsonObject());
         List<String> entrypoints = strings(descriptor, "entrypoints");
         verifyClasses(classes);
         verifyClasses(tombstones);
         verifyClasses(parentDefinitions);
         validateLifecycle(classes, hooks, entrypoints);
+        validateSharedContract(descriptor, classes, parentDefinitions, addedClasses, sharedClasses);
 
         Instrumentation instrumentation = AllcraftAgent.instrumentation();
         ClassLoader gameLoader = AllcraftRuntime.class.getClassLoader();
@@ -110,6 +112,7 @@ public final class AllcraftRuntime {
             parentDefinitions,
             addedClasses,
             deletedClasses,
+            sharedClasses,
             hooks,
             entrypoints,
             previous,
@@ -145,7 +148,7 @@ public final class AllcraftRuntime {
         }
     }
 
-    /** Leaves the active world's code: run rollback hooks, restore base classes, and retire additions. */
+    /** Leaves the active world's code while retaining executable definitions for world-added classes. */
     public static synchronized void resetToBase() throws Exception {
         for (int index = PENDING_COMMITS.size() - 1; index >= 0; index--) {
             rollback(PENDING_COMMITS.get(index));
@@ -159,8 +162,6 @@ public final class AllcraftRuntime {
         ACTIVE_REVISIONS.clear();
 
         Instrumentation instrumentation = AllcraftAgent.instrumentation();
-        ClassLoader loader = AllcraftRuntime.class.getClassLoader();
-        Map<String, Class<?>> loaded = loadedClasses(instrumentation, loader);
         List<ClassDefinition> definitions = new ArrayList<>();
         Map<Class<?>, byte[]> next = new IdentityHashMap<>();
         for (Map.Entry<Class<?>, byte[]> entry : BASE_DEFINITIONS.entrySet()) {
@@ -169,18 +170,10 @@ public final class AllcraftRuntime {
                 next.put(entry.getKey(), entry.getValue());
             }
         }
-        for (String className : ADDED_CLASSES) {
-            Class<?> type = loaded.get(className);
-            byte[] tombstone = TOMBSTONES.get(className);
-            if (type != null && tombstone != null && !Arrays.equals(tombstone, CURRENT_DEFINITIONS.get(type))) {
-                definitions.add(new ClassDefinition(type, tombstone));
-                next.put(type, tombstone);
-            }
-        }
         if (!definitions.isEmpty()) {
             instrumentation.redefineClasses(definitions.toArray(ClassDefinition[]::new));
             CURRENT_DEFINITIONS.putAll(next);
-            LOGGER.info("Reconciled {} runtime class(es) while leaving the previous Allcraft world", definitions.size());
+            LOGGER.info("Reconciled {} base runtime class(es) while retaining world-added definitions safely", definitions.size());
         }
     }
 
@@ -209,7 +202,7 @@ public final class AllcraftRuntime {
                 type = Class.forName(className, false, loader);
             }
             byte[] current = transaction.addedClasses.contains(className)
-                ? transaction.tombstones.get(className)
+                ? CURRENT_DEFINITIONS.get(type)
                 : transaction.parentDefinitions.get(className);
             if (current != null && !Arrays.equals(current, desired)) {
                 restoreDefinitions.add(new ClassDefinition(type, current));
@@ -320,6 +313,14 @@ public final class AllcraftRuntime {
             Map<String, Class<?>> loaded = loadedClasses(instrumentation, loader);
             for (Map.Entry<String, byte[]> entry : transaction.classes.entrySet()) {
                 String className = entry.getKey();
+                if (transaction.deletedClasses.contains(className)) {
+                    // The ordinary JVM cannot unload one class, and replacing every method with a
+                    // throwing tombstone corrupts live menus/entities/tasks that still own it. A
+                    // deletion therefore retires future source/registry reachability while keeping
+                    // the last executable definition resident until process exit or name reuse.
+                    skipped.add(className);
+                    continue;
+                }
                 Class<?> type = loaded.get(className);
                 boolean declaredAddition = transaction.addedClasses.contains(className);
                 if (type == null) {
@@ -476,14 +477,9 @@ public final class AllcraftRuntime {
                 restored.put(type, entry.getValue());
             }
         }
-        for (String className : transaction.introducedClasses) {
-            Class<?> type = loaded.get(className);
-            byte[] tombstone = transaction.tombstones.get(className);
-            if (type != null && tombstone != null) {
-                definitions.add(new ClassDefinition(type, tombstone));
-                restored.put(type, tombstone);
-            }
-        }
+        // Introduced classes deliberately remain executable. Registry/cache undo removes future
+        // reachability; residency is the only generally safe choice when arbitrary Java references
+        // may still point at instances, lambdas, method handles, or active stack frames.
         try {
             if (!definitions.isEmpty()) {
                 instrumentation.redefineClasses(definitions.toArray(ClassDefinition[]::new));
@@ -541,6 +537,60 @@ public final class AllcraftRuntime {
             byte[] bytes = classes.get(className);
             if (bytes != null && !hasMethod(bytes, "allcraftActivate", "()V")) {
                 throw new IOException("Staged entrypoint " + className + " has no static-compatible allcraftActivate() method");
+            }
+        }
+    }
+
+    private static Map<String, String> sharedClasses(JsonObject descriptor) throws IOException {
+        if (!descriptor.has("sharedClasses")) {
+            return Map.of();
+        }
+        Map<String, String> result = new java.util.TreeMap<>();
+        try {
+            descriptor.getAsJsonObject("sharedClasses").entrySet().forEach(entry -> result.put(entry.getKey(), entry.getValue().getAsString()));
+        } catch (RuntimeException e) {
+            throw new IOException("Invalid shared logical class contract", e);
+        }
+        return Map.copyOf(result);
+    }
+
+    private static void validateSharedContract(
+        JsonObject descriptor,
+        Map<String, byte[]> classes,
+        Map<String, byte[]> parentDefinitions,
+        Set<String> addedClasses,
+        Map<String, String> sharedClasses
+    ) throws IOException {
+        if (!descriptor.has("sharedContract")) {
+            return; // Immutable artifacts produced before canonical shared contracts remain replayable.
+        }
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+        new java.util.TreeMap<>(sharedClasses).forEach((name, hash) -> {
+            digest.update(name.getBytes(StandardCharsets.UTF_8));
+            digest.update((byte)0);
+            digest.update(hash.getBytes(StandardCharsets.UTF_8));
+            digest.update((byte)0);
+        });
+        String actualContract = HexFormat.of().formatHex(digest.digest());
+        String expectedContract = descriptor.get("sharedContract").getAsString();
+        if (!actualContract.equals(expectedContract)) {
+            throw new IOException("Shared logical class contract digest mismatch");
+        }
+        for (Map.Entry<String, String> entry : sharedClasses.entrySet()) {
+            byte[] bytes = classes.get(entry.getKey());
+            if (bytes == null) {
+                bytes = parentDefinitions.get(entry.getKey());
+            }
+            if (addedClasses.contains(entry.getKey()) && bytes == null) {
+                throw new IOException("Added shared logical class bytes are missing for " + entry.getKey());
+            }
+            if (bytes != null && !sha256(bytes).equals(entry.getValue())) {
+                throw new IOException("Shared logical class bytes do not match the contract for " + entry.getKey());
             }
         }
     }
@@ -710,6 +760,14 @@ public final class AllcraftRuntime {
         }
     }
 
+    private static String sha256(byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     private static long elapsedMillis(long startedAt) {
         return (System.nanoTime() - startedAt) / 1_000_000L;
     }
@@ -739,6 +797,7 @@ public final class AllcraftRuntime {
         private final Map<String, byte[]> parentDefinitions;
         private final Set<String> addedClasses;
         private final Set<String> deletedClasses;
+        private final Map<String, String> sharedClasses;
         private final Hooks hooks;
         private final List<String> entrypoints;
         private final Map<String, byte[]> stagedPrevious;
@@ -762,6 +821,7 @@ public final class AllcraftRuntime {
             Map<String, byte[]> parentDefinitions,
             Set<String> addedClasses,
             Set<String> deletedClasses,
+            Map<String, String> sharedClasses,
             Hooks hooks,
             List<String> entrypoints,
             Map<String, byte[]> previous,
@@ -775,6 +835,7 @@ public final class AllcraftRuntime {
             this.parentDefinitions = parentDefinitions;
             this.addedClasses = addedClasses;
             this.deletedClasses = deletedClasses;
+            this.sharedClasses = sharedClasses;
             this.hooks = hooks;
             this.entrypoints = entrypoints;
             this.stagedPrevious = new LinkedHashMap<>(previous);
@@ -782,6 +843,7 @@ public final class AllcraftRuntime {
             this.registryTransaction = AllcraftRegistries.transaction(
                 context.worldId(), context.side(), context.toRevision(), context.patchId()
             );
+            this.registryTransaction.sharedClasses(sharedClasses.keySet(), classes.keySet(), descriptor.has("sharedContract"));
         }
 
         public synchronized ApplyResult publish() throws Exception {

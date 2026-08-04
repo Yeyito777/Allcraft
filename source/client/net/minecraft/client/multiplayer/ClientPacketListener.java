@@ -464,7 +464,6 @@ public class ClientPacketListener extends ClientCommonPacketListenerImpl impleme
 
     public void close() {
         this.closed = true;
-        AllcraftPatchClient.disconnect(this.minecraft);
         this.clearLevel();
         this.telemetryManager.onDisconnect();
     }

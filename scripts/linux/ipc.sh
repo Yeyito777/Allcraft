@@ -18,7 +18,7 @@ import sys
 endpoint_path = sys.argv[1]
 args = sys.argv[2:]
 if not args:
-    raise SystemExit("usage: ipc.sh status|worlds|join|create|chat|command|quit|raw ...")
+    raise SystemExit("usage: ipc.sh status|worlds|join|create|chat|command|use-block|close-screen|quit|raw ...")
 
 verb = args[0]
 rest = args[1:]
@@ -36,6 +36,10 @@ elif verb == "chat" and rest:
     request = {"action": "chat", "text": " ".join(rest)}
 elif verb == "command" and rest:
     request = {"action": "command", "text": " ".join(rest)}
+elif verb == "use-block" and len(rest) == 3:
+    request = {"action": "use-block", "x": int(rest[0]), "y": int(rest[1]), "z": int(rest[2])}
+elif verb == "close-screen":
+    request = {"action": "close-screen"}
 elif verb == "quit":
     request = {"action": "quit-world"}
 elif verb == "raw" and rest:

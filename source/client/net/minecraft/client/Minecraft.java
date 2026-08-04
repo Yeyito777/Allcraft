@@ -80,6 +80,7 @@ import net.minecraft.ReportedException;
 import net.minecraft.SharedConstants;
 import net.minecraft.SystemReport;
 import net.minecraft.allcraft.AllcraftIpcServer;
+import net.minecraft.allcraft.AllcraftPatchClient;
 import net.minecraft.client.color.block.BlockColors;
 import net.minecraft.client.entity.ClientMannequin;
 import net.minecraft.client.gui.ComponentPath;
@@ -2493,6 +2494,10 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
             this.isLocalServer = false;
             this.updateLevelInEngines(null, stopSound);
             this.player = null;
+            // Class/resource rollback is deliberately last. In integrated play the server has now
+            // stopped, closed player menus, removed entities, drained level tasks, and released its
+            // worlds; the old client screen and level objects have also been detached.
+            AllcraftPatchClient.disconnect(this);
         } finally {
             this.gui.setClientLevelTeardownInProgress(false);
         }

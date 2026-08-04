@@ -29,14 +29,20 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.multiplayer.ClientPacketListener;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.FileUtil;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.LevelSettings;
 import net.minecraft.world.level.WorldDataConfiguration;
 import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 
 /** Loopback-only automation API used by Allcraft's development tools. */
@@ -132,6 +138,8 @@ public final class AllcraftIpcServer {
             case "quit-world" -> onClientThread(this::quitWorld);
             case "chat" -> onClientThread(() -> sendChat(requiredString(request, "text"), false));
             case "command" -> onClientThread(() -> sendChat(requiredString(request, "text"), true));
+            case "use-block" -> onClientThread(() -> useBlock(request));
+            case "close-screen" -> onClientThread(this::closeScreen);
             default -> throw new IOException("Unknown Allcraft IPC action: " + action);
         };
     }
@@ -143,6 +151,11 @@ public final class AllcraftIpcServer {
         response.addProperty("screen", this.minecraft.gui.screen() == null ? null : this.minecraft.gui.screen().getClass().getSimpleName());
         response.addProperty("inWorld", this.minecraft.level != null && this.minecraft.player != null);
         response.addProperty("player", this.minecraft.player == null ? null : this.minecraft.player.getName().getString());
+        if (this.minecraft.player != null) {
+            response.addProperty("x", this.minecraft.player.getX());
+            response.addProperty("y", this.minecraft.player.getY());
+            response.addProperty("z", this.minecraft.player.getZ());
+        }
         response.addProperty(
             "world",
             this.minecraft.getSingleplayerServer() == null ? null : this.minecraft.getSingleplayerServer().getWorldData().getLevelName()
@@ -228,6 +241,30 @@ public final class AllcraftIpcServer {
         return accepted(command ? "command" : "chat", text);
     }
 
+    private JsonObject useBlock(JsonObject request) throws IOException {
+        if (this.minecraft.player == null || this.minecraft.level == null || this.minecraft.gameMode == null) {
+            throw new IOException("The client is not ready to interact with a world");
+        }
+        BlockPos pos = new BlockPos(requiredInt(request, "x"), requiredInt(request, "y"), requiredInt(request, "z"));
+        BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
+        InteractionResult result = this.minecraft.gameMode.useItemOn(this.minecraft.player, InteractionHand.MAIN_HAND, hit);
+        JsonObject response = accepted("use-block", pos.toShortString());
+        response.addProperty("result", result.toString());
+        return response;
+    }
+
+    private JsonObject closeScreen() throws IOException {
+        if (this.minecraft.player == null) {
+            throw new IOException("The client is not connected to a world");
+        }
+        if (this.minecraft.player.containerMenu != this.minecraft.player.inventoryMenu) {
+            this.minecraft.player.closeContainer();
+        } else {
+            this.minecraft.gui.setScreen(null);
+        }
+        return accepted("close-screen", "screen");
+    }
+
     private void leaveCurrentWorld() {
         if (this.minecraft.level != null) {
             this.minecraft.level.disconnect(Component.literal("Allcraft IPC switching worlds"));
@@ -299,6 +336,13 @@ public final class AllcraftIpcServer {
             throw new IOException("Missing string property: " + property);
         }
         return request.get(property).getAsString();
+    }
+
+    private static int requiredInt(JsonObject request, String property) throws IOException {
+        if (!request.has(property) || !request.get(property).isJsonPrimitive()) {
+            throw new IOException("Missing integer property: " + property);
+        }
+        return request.get(property).getAsInt();
     }
 
     private static String conciseMessage(Throwable throwable) {

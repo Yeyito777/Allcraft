@@ -2,6 +2,8 @@ package allcraft.registrytest;
 
 import com.mojang.serialization.Lifecycle;
 import java.util.List;
+import java.util.Set;
+import java.util.function.Supplier;
 import net.minecraft.allcraft.AllcraftRegistries;
 import net.minecraft.core.Holder;
 import net.minecraft.core.MappedRegistry;
@@ -18,7 +20,7 @@ public final class RegistryEvolutionRegression {
     private static final ResourceKey<Value> BASE = ResourceKey.create(
         REGISTRY_KEY, Identifier.fromNamespaceAndPath("allcraft", "base")
     );
-    private static final ResourceKey<Value> DYNAMIC = ResourceKey.create(
+    static final ResourceKey<Value> DYNAMIC = ResourceKey.create(
         REGISTRY_KEY, Identifier.fromNamespaceAndPath("allcraft", "dynamic")
     );
 
@@ -46,6 +48,7 @@ public final class RegistryEvolutionRegression {
         testCommittedRetirementAndReplay();
         testDynamicRegistryAccess();
         testPlanConflict();
+        testCanonicalFactoryOwnership();
         System.out.println("PASS registry-evolution");
     }
 
@@ -153,6 +156,35 @@ public final class RegistryEvolutionRegression {
         require(!dynamic.containsKey(DYNAMIC), "dynamic registry rollback leaked a key");
     }
 
+    private static void testCanonicalFactoryOwnership() throws Exception {
+        MappedRegistry<Value> registry = registry();
+        AllcraftRegistries.Transaction rejected = AllcraftRegistries.transaction("world", "server", 5L, "side-factory");
+        rejected.sharedClasses(
+            Set.of(SharedOwner.class.getName()),
+            Set.of(SharedOwner.class.getName(), SideFactory.class.getName()),
+            true
+        );
+        boolean failed = false;
+        try {
+            AllcraftRegistries.run(rejected, () -> SharedOwner.register(registry, SideFactory.factory()));
+        } catch (IllegalStateException expected) {
+            failed = expected.getMessage().contains("side-only class");
+        }
+        require(failed, "a side-owned logical registry factory bypassed the shared contract");
+        rejected.rollback();
+
+        AllcraftRegistries.Transaction accepted = AllcraftRegistries.transaction("world", "server", 6L, "shared-factory");
+        accepted.sharedClasses(
+            Set.of(SharedOwner.class.getName()),
+            Set.of(SharedOwner.class.getName(), SideFactory.class.getName()),
+            true
+        );
+        AllcraftRegistries.run(accepted, () -> SharedOwner.register(registry, SharedOwner.factory()));
+        accepted.closePublication();
+        require(registry.containsKey(DYNAMIC), "canonical shared logical factory was rejected");
+        accepted.rollback();
+    }
+
     private static MappedRegistry<Value> registry() {
         MappedRegistry<Value> registry = new MappedRegistry<>(REGISTRY_KEY, Lifecycle.stable());
         Registry.register(registry, BASE, new Value("base"));
@@ -174,7 +206,7 @@ public final class RegistryEvolutionRegression {
         }
     }
 
-    private record Value(String name) {
+    record Value(String name) {
     }
 
     private static final class IntrusiveValue {
@@ -183,5 +215,24 @@ public final class RegistryEvolutionRegression {
         private IntrusiveValue(MappedRegistry<IntrusiveValue> registry) {
             this.holder = registry.createIntrusiveHolder(this);
         }
+    }
+}
+
+final class SharedOwner {
+    static Supplier<RegistryEvolutionRegression.Value> factory() {
+        return () -> new RegistryEvolutionRegression.Value("shared");
+    }
+
+    static void register(
+        MappedRegistry<RegistryEvolutionRegression.Value> registry,
+        Supplier<RegistryEvolutionRegression.Value> factory
+    ) {
+        AllcraftRegistries.registerLazy(registry, RegistryEvolutionRegression.DYNAMIC, factory);
+    }
+}
+
+final class SideFactory {
+    static Supplier<RegistryEvolutionRegression.Value> factory() {
+        return () -> new RegistryEvolutionRegression.Value("side");
     }
 }

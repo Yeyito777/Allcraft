@@ -3,14 +3,17 @@ package allcraft.generalitytest;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
+import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.util.jar.JarOutputStream;
 import net.minecraft.allcraft.AllcraftRevisionBuilder;
 import net.minecraft.allcraft.AllcraftRuntime;
 
@@ -30,6 +33,8 @@ public final class CodeGeneralityRegression {
         Files.createDirectories(work);
         System.setProperty("allcraft.javac", javac.toString());
         System.setProperty("allcraft.baseJar", baseJar.toString());
+
+        testSharedContractGuards(work);
 
         Path firstWorld = world(work.resolve("world-a"));
         AllcraftRevisionBuilder.initializeBaseline(firstWorld);
@@ -84,6 +89,8 @@ public final class CodeGeneralityRegression {
         second.finish();
         commit(firstWorld, revisionTwo);
         second.seal();
+        Object liveProbe = probeClass().getConstructor().newInstance();
+        require("live-v2-a".equals(callLiveProbe(liveProbe)), "revision two live object was not created");
 
         // A malformed arbitrary edit must fail before an artifact is activated or a snapshot advances.
         Path broken = firstWorld.resolve("source/client/allcraft/generality/Broken.java");
@@ -120,7 +127,8 @@ public final class CodeGeneralityRegression {
         Files.delete(firstWorld.resolve("source/client/allcraft/generality/FailingHooks.java"));
         writeHookConfig(firstWorld.resolve("source"), "allcraft.generality.RevisionTwoHooks");
 
-        // Removing all world classes generates shape-compatible tombstones automatically.
+        // Removing world classes retires source reachability without destroying executable bodies
+        // that may still be owned by live objects, lambdas, callbacks, or stack frames.
         deleteGeneralitySources(firstWorld.resolve("source"));
         deleteAdditionalSources(firstWorld.resolve("source"));
         Files.delete(firstWorld.resolve("source/allcraft-revision.json"));
@@ -140,15 +148,17 @@ public final class CodeGeneralityRegression {
         );
         AllcraftRuntime.Transaction retired = AllcraftRuntime.stage(deletion.clientArtifactPath(), deletion.clientSha256());
         require(retired.publish().retiredClasses() >= 3, "deleted classes were not retired");
-        require(probeIsRetired(), "retired class still executes its old method body");
+        require("v2-a:structural".equals(callProbe()), "logical retirement destroyed a still-live class definition");
+        require("live-v2-a".equals(callLiveProbe(liveProbe)), "class retirement destroyed a live object's method body");
         retired.finish();
         commit(firstWorld, deletion);
         retired.seal();
 
         // Leaving the world rolls committed revisions back in reverse order, then another world's
-        // identically-named additions can replace the process-lifetime tombstones.
+        // identically-named additions can replace the safely retained process-lifetime definition.
         AllcraftRuntime.resetToBase();
-        require(probeIsRetired(), "world exit resurrected a world-only class");
+        require(callProbe().startsWith("v1-a"), "world exit destroyed a world-only class still reachable by live Java references");
+        require("live-v1-a".equals(callLiveProbe(liveProbe)), "world reset destroyed a retained live object");
         Path secondWorld = world(work.resolve("world-b"));
         AllcraftRevisionBuilder.initializeBaseline(secondWorld);
         writeVersionOne(secondWorld.resolve("source"), "b");
@@ -164,12 +174,85 @@ public final class CodeGeneralityRegression {
         AllcraftRuntime.resetToBase();
 
         // Reopening the first world replays its immutable artifacts deterministically, including
-        // historical hook implementations that had been retired by later revisions.
+        // historical hook implementations and logical class retirement.
         replay(firstWorld);
-        require(probeIsRetired(), "reconnect replay did not restore the selected deleted-class state");
+        require("v2-a:structural".equals(callProbe()), "reconnect replay did not restore safe logical retirement");
         AllcraftRuntime.resetToBase();
 
-        System.out.println("PASS code-generality: differ, side artifacts, cache, structural DCEVM, migrations, rollback, retirement, world switch, replay");
+        System.out.println("PASS code-generality: differ, shared contracts, cache, structural DCEVM, migrations, rollback, safe retirement, world switch, replay");
+    }
+
+    private static void testSharedContractGuards(Path work) throws Exception {
+        Path divergent = world(work.resolve("contract-divergent"));
+        AllcraftRevisionBuilder.initializeBaseline(divergent);
+        Path divergentClient = divergent.resolve("source/client/allcraft/contract/DivergentClient.java");
+        Path divergentServer = divergent.resolve("source/server/allcraft/contract/DivergentServer.java");
+        Files.createDirectories(divergentClient.getParent());
+        Files.createDirectories(divergentServer.getParent());
+        Files.writeString(
+            divergentClient,
+            "package allcraft.contract; import net.minecraft.allcraft.AllcraftRegistries; "
+                + "public final class DivergentClient { public static void mutate() { AllcraftRegistries.registry(null); } }\n",
+            StandardCharsets.UTF_8
+        );
+        Files.writeString(
+            divergentServer,
+            "package allcraft.contract; import net.minecraft.allcraft.AllcraftRegistries; "
+                + "public final class DivergentServer { public static void mutate() { AllcraftRegistries.registry(null); } }\n",
+            StandardCharsets.UTF_8
+        );
+        boolean divergenceRejected = false;
+        try {
+            AllcraftRevisionBuilder.prepare(divergent, AllcraftRevisionBuilder.Request.production("divergent-types"));
+        } catch (Exception expected) {
+            divergenceRejected = expected.getMessage() != null && expected.getMessage().contains("Side-only class");
+        }
+        require(divergenceRejected, "side-divergent registry logic was not rejected before artifact staging");
+
+        Path canonical = world(work.resolve("contract-canonical"));
+        AllcraftRevisionBuilder.initializeBaseline(canonical);
+        Path shared = canonical.resolve("source/shared/allcraft/contract/CanonicalLogical.java");
+        Files.createDirectories(shared.getParent());
+        Files.writeString(
+            shared,
+            "package allcraft.contract; public final class CanonicalLogical { public static String identity() { return \"shared\"; } }\n",
+            StandardCharsets.UTF_8
+        );
+        AllcraftRevisionBuilder.PreparedRevision prepared = AllcraftRevisionBuilder.prepare(
+            canonical, AllcraftRevisionBuilder.Request.production("shared-contract")
+        );
+        AllcraftRuntime.stage(prepared.clientArtifactPath(), prepared.clientSha256());
+        Path tampered = canonical.resolve("patches/artifacts/client/tampered-contract.jar");
+        tamperSharedContract(prepared.clientArtifactPath(), tampered);
+        boolean tamperRejected = false;
+        try {
+            AllcraftRuntime.stage(tampered, sha256(tampered));
+        } catch (Exception expected) {
+            tamperRejected = expected.getMessage() != null && expected.getMessage().contains("contract digest mismatch");
+        }
+        require(tamperRejected, "tampered shared logical class contract reached runtime staging");
+        AllcraftRevisionBuilder.discard(prepared);
+    }
+
+    private static void tamperSharedContract(Path source, Path destination) throws Exception {
+        Files.createDirectories(destination.getParent());
+        try (JarFile input = new JarFile(source.toFile()); JarOutputStream output = new JarOutputStream(Files.newOutputStream(destination))) {
+            for (JarEntry entry : input.stream().filter(value -> !value.isDirectory()).toList()) {
+                byte[] bytes = input.getInputStream(entry).readAllBytes();
+                if (entry.getName().equals("META-INF/allcraft-patch.json")) {
+                    JsonObject descriptor = JsonParser.parseString(new String(bytes, StandardCharsets.UTF_8)).getAsJsonObject();
+                    descriptor.addProperty("sharedContract", "0".repeat(64));
+                    bytes = (descriptor + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
+                }
+                output.putNextEntry(new JarEntry(entry.getName()));
+                output.write(bytes);
+                output.closeEntry();
+            }
+        }
+    }
+
+    private static String sha256(Path path) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)));
     }
 
     private static Path world(Path root) throws Exception {
@@ -198,8 +281,9 @@ public final class CodeGeneralityRegression {
             public class Probe {
                 public static int value = 1;
                 public static String message() { return "v1-%s"; }
+                public String liveMessage() { return "live-v1-%s"; }
             }
-            """.formatted(world),
+            """.formatted(world, world),
             StandardCharsets.UTF_8
         );
         Files.writeString(
@@ -257,9 +341,10 @@ public final class CodeGeneralityRegression {
                 public static int value = 11;
                 public static String addedField = "structural";
                 public static String message() { return "v2-%s:" + addedField; }
+                public String liveMessage() { return "live-v2-%s"; }
                 public static long addedMethod(long input) { return input * 2L; }
             }
-            """.formatted(world),
+            """.formatted(world, world),
             StandardCharsets.UTF_8
         );
         Files.writeString(
@@ -416,14 +501,8 @@ public final class CodeGeneralityRegression {
         return probeClass().getField("value").getInt(null);
     }
 
-    private static boolean probeIsRetired() throws Exception {
-        try {
-            Method method = probeClass().getMethod("message");
-            method.invoke(null);
-            return false;
-        } catch (InvocationTargetException expected) {
-            return expected.getCause() instanceof NoClassDefFoundError;
-        }
+    private static String callLiveProbe(Object probe) throws Exception {
+        return (String)probeClass().getMethod("liveMessage").invoke(probe);
     }
 
     private static Class<?> probeClass() throws Exception {

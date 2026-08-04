@@ -31,6 +31,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -70,6 +71,17 @@ public final class AllcraftRevisionBuilder {
     );
     private static final ClassDesc NO_CLASS_DEF = ClassDesc.of("java.lang.NoClassDefFoundError");
     private static final MethodTypeDesc STRING_CONSTRUCTOR = MethodTypeDesc.ofDescriptor("(Ljava/lang/String;)V");
+    private static final Set<String> SHARED_LOGICAL_ROOTS = Set.of(
+        "net.minecraft.network.protocol.Packet",
+        "net.minecraft.network.protocol.common.custom.CustomPacketPayload",
+        "net.minecraft.world.inventory.AbstractContainerMenu",
+        "net.minecraft.world.entity.Entity",
+        "net.minecraft.world.level.block.entity.BlockEntity",
+        "net.minecraft.world.level.block.Block",
+        "net.minecraft.world.item.Item",
+        "net.minecraft.world.item.crafting.Recipe",
+        "net.minecraft.core.particles.ParticleType"
+    );
     private static volatile List<String> baseClassEntries;
 
     private AllcraftRevisionBuilder() {
@@ -129,14 +141,15 @@ public final class AllcraftRevisionBuilder {
         SideBuild client = buildSide(Side.CLIENT, sourceRoot, patchesRoot, worldManifest, previous, scanned, diff);
         SideBuild server = buildSide(Side.SERVER, sourceRoot, patchesRoot, worldManifest, previous, scanned, diff);
         SourceSnapshot next = withCompiledClasses(scanned, previous, client, server);
+        SharedContract sharedContract = validateSharedContract(next, client, server, patchesRoot, worldManifest);
         Path stagedSnapshot = patchesRoot.resolve("transactions").resolve(patchId + "-source.json");
         writeSnapshot(stagedSnapshot, next);
 
         byte[] clientArtifact = createArtifact(
-            Side.CLIENT, request, serverId, worldId, runId, patchId, parentRevision, revision, client, diff
+            Side.CLIENT, request, serverId, worldId, runId, patchId, parentRevision, revision, client, diff, sharedContract
         );
         byte[] serverArtifact = createArtifact(
-            Side.SERVER, request, serverId, worldId, runId, patchId, parentRevision, revision, server, diff
+            Side.SERVER, request, serverId, worldId, runId, patchId, parentRevision, revision, server, diff, sharedContract
         );
         Path clientPath = patchesRoot.resolve("artifacts/client").resolve(stem(revision, patchId) + ".jar");
         Path serverPath = patchesRoot.resolve("artifacts/server").resolve(stem(revision, patchId) + ".jar");
@@ -161,6 +174,8 @@ public final class AllcraftRevisionBuilder {
         descriptor.addProperty("addedServerClasses", server.addedClasses.size());
         descriptor.addProperty("deletedClientClasses", client.deletedClasses.size());
         descriptor.addProperty("deletedServerClasses", server.deletedClasses.size());
+        descriptor.addProperty("sharedContract", sharedContract.digest);
+        descriptor.addProperty("sharedLogicalClasses", sharedContract.classes.size());
         descriptor.addProperty("clientResources", client.resources.size());
         descriptor.addProperty("serverResources", server.resources.size());
         descriptor.addProperty("createdAt", Instant.now().toString());
@@ -376,6 +391,131 @@ public final class AllcraftRevisionBuilder {
             files.put(path, state.withClassNames(names.stream().filter(value -> value != null).sorted().toList()));
         }
         return new SourceSnapshot(scanned.revision, Map.copyOf(files));
+    }
+
+    /**
+     * Shared source is the canonical identity boundary for synchronized registry values. Side-only
+     * code may install screens, renderers, providers, and keybindings, but it must not create a
+     * second client/server interpretation of the same logical registry entry.
+     */
+    private static SharedContract validateSharedContract(
+        SourceSnapshot snapshot,
+        SideBuild client,
+        SideBuild server,
+        Path patchesRoot,
+        JsonObject worldManifest
+    ) throws IOException {
+        rejectSideRegistryMutations(snapshot, client, Side.CLIENT);
+        rejectSideRegistryMutations(snapshot, server, Side.SERVER);
+
+        Map<String, String> hashes = new java.util.TreeMap<>();
+        for (Map.Entry<String, FileState> entry : snapshot.files.entrySet()) {
+            FileState state = entry.getValue();
+            if (!state.kind.equals("java") || !state.scope.equals("shared")) {
+                continue;
+            }
+            for (String className : state.classNames) {
+                byte[] clientBytes = classBytes(client, Side.CLIENT, className, patchesRoot, worldManifest);
+                byte[] serverBytes = classBytes(server, Side.SERVER, className, patchesRoot, worldManifest);
+                if (clientBytes == null || serverBytes == null) {
+                    throw new IOException("Shared logical class bytes are unavailable on both sides for " + className);
+                }
+                if (!Arrays.equals(clientBytes, serverBytes)) {
+                    throw new IOException(
+                        "Shared logical class " + className + " compiled differently for client and server; move side-only behavior into wrappers"
+                    );
+                }
+                hashes.put(className, sha256(clientBytes));
+            }
+        }
+
+        MessageDigest digest = digest();
+        hashes.forEach((name, hash) -> {
+            update(digest, name);
+            update(digest, hash);
+        });
+        return new SharedContract(Map.copyOf(hashes), HexFormat.of().formatHex(digest.digest()));
+    }
+
+    private static void rejectSideRegistryMutations(SourceSnapshot snapshot, SideBuild build, Side side) throws IOException {
+        for (String path : build.compiledSources) {
+            FileState state = snapshot.files.get(path);
+            if (state == null || state.scope.equals("shared")) {
+                continue;
+            }
+            for (String className : classesForSource(path, build.classes)) {
+                byte[] bytes = build.classes.get(classEntry(className));
+                if (bytes != null && build.addedClasses.contains(className) && isSharedLogicalType(bytes, build.classes, new HashSet<>())) {
+                    throw new IOException(
+                        "Side-only class "
+                            + className
+                            + " is a client/server logical type; move its canonical definition to shared/ and keep only "
+                            + side.id
+                            + " integration here"
+                    );
+                }
+                if (bytes != null && invokesRegistryMutation(bytes)) {
+                    throw new IOException(
+                        "Side-only class "
+                            + className
+                            + " mutates synchronized registries; move logical registration and value classes to shared/ and keep only "
+                            + side.id
+                            + " integration here"
+                    );
+                }
+            }
+        }
+    }
+
+    private static boolean isSharedLogicalType(byte[] bytes, Map<String, byte[]> emitted, Set<String> visiting) {
+        ClassModel model = ClassFile.of().parse(bytes);
+        String className = model.thisClass().asInternalName().replace('/', '.');
+        if (!visiting.add(className)) {
+            return false;
+        }
+        List<String> parents = new ArrayList<>();
+        model.superclass().ifPresent(parent -> parents.add(parent.asInternalName().replace('/', '.')));
+        model.interfaces().forEach(parent -> parents.add(parent.asInternalName().replace('/', '.')));
+        for (String parent : parents) {
+            if (SHARED_LOGICAL_ROOTS.contains(parent)) {
+                return true;
+            }
+            byte[] parentBytes = emitted.get(classEntry(parent));
+            if (parentBytes != null && isSharedLogicalType(parentBytes, emitted, visiting)) {
+                return true;
+            }
+            try {
+                Class<?> parentType = Class.forName(parent, false, AllcraftRevisionBuilder.class.getClassLoader());
+                for (String root : SHARED_LOGICAL_ROOTS) {
+                    if (Class.forName(root, false, AllcraftRevisionBuilder.class.getClassLoader()).isAssignableFrom(parentType)) {
+                        return true;
+                    }
+                }
+            } catch (ClassNotFoundException ignored) {
+                // A generated parent is inspected from emitted bytes above. An unresolved external
+                // parent remains subject to the registry caller/factory guards at runtime.
+            }
+        }
+        return false;
+    }
+
+    private static boolean invokesRegistryMutation(byte[] bytes) {
+        Set<String> mutations = Set.of("register", "registerLazy", "replace", "remove", "retire", "reactivate", "registry");
+        for (java.lang.classfile.constantpool.PoolEntry entry : ClassFile.of().parse(bytes).constantPool()) {
+            if (entry instanceof java.lang.classfile.constantpool.MemberRefEntry reference
+                && reference.owner().asInternalName().equals("net/minecraft/allcraft/AllcraftRegistries")
+                && mutations.contains(reference.name().stringValue())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static byte[] classBytes(
+        SideBuild build, Side side, String className, Path patchesRoot, JsonObject worldManifest
+    ) throws IOException {
+        byte[] emitted = build.classes.get(classEntry(className));
+        return emitted == null ? previousClassBytes(side, className, patchesRoot, worldManifest) : emitted;
     }
 
     private static Set<String> dependencyClosure(
@@ -696,7 +836,8 @@ public final class AllcraftRevisionBuilder {
         long parentRevision,
         long revision,
         SideBuild build,
-        Diff diff
+        Diff diff,
+        SharedContract sharedContract
     ) throws IOException {
         JsonObject descriptor = new JsonObject();
         descriptor.addProperty("format", ARTIFACT_FORMAT);
@@ -724,6 +865,10 @@ public final class AllcraftRevisionBuilder {
         descriptor.add("deletedResources", strings(build.deletedResources));
         descriptor.add("hooks", build.hooks.toJson());
         descriptor.add("entrypoints", strings(side == Side.CLIENT ? request.clientEntrypoints : request.serverEntrypoints));
+        descriptor.addProperty("sharedContract", sharedContract.digest);
+        JsonObject sharedClasses = new JsonObject();
+        sharedContract.classes.forEach(sharedClasses::addProperty);
+        descriptor.add("sharedClasses", sharedClasses);
 
         byte[] json = (GSON.toJson(descriptor) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -1385,6 +1530,9 @@ public final class AllcraftRevisionBuilder {
     }
 
     private record Diff(List<String> changed, List<String> deleted, List<String> moved) {
+    }
+
+    private record SharedContract(Map<String, String> classes, String digest) {
     }
 
     private record Compilation(Map<String, byte[]> classes, boolean cacheHit, long elapsedMillis) {

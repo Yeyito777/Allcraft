@@ -17,7 +17,8 @@ mkdir -p "$classes" "$support" "$work"
     -cp "$repo_root/build/allcraft-26.2.jar:$(<"$repo_root/build/compile-classpath.txt")" \
     -d "$support" \
     "$repo_root/source/client/net/minecraft/allcraft/AllcraftRevisionBuilder.java" \
-    "$repo_root/source/client/net/minecraft/allcraft/AllcraftRuntime.java"
+    "$repo_root/source/client/net/minecraft/allcraft/AllcraftRuntime.java" \
+    "$repo_root/source/client/net/minecraft/allcraft/AllcraftRegistries.java"
 
 "$java_home/bin/javac" \
     -encoding UTF-8 \

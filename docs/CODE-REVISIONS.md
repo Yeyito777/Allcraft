@@ -14,13 +14,15 @@ The command runs the same pipeline used by code/resource test fixtures. Clients 
 
 ```text
 source/
-├── client/                    # client-distribution Java and assets/
-├── server/                    # dedicated-server Java and data/
-├── shared/                    # optional inputs included on both sides
+├── client/                    # side-only client integrations and assets/
+├── server/                    # side-only server integrations and data/
+├── shared/                    # canonical logical classes used by both sides
 └── allcraft-revision.json     # optional lifecycle hooks
 ```
 
 Every revision is compared with `patches/revisions/current-source.json`. Added, changed, moved, and deleted files are discovered by path and SHA-256. Java reverse dependencies are conservatively recompiled; outputs are cached by side, compiler, source closure, and classpath identity.
+
+Registry- and network-facing logical registration belongs in `shared/`. The builder verifies that every shared class compiles byte-identically on both sides, embeds a hashed shared-class contract, and rejects side-only registry mutation. Screens, renderers, particle providers, keybindings, and other genuinely side-only integrations remain under `client/` or `server/`.
 
 ## Artifact contents
 
@@ -29,11 +31,11 @@ Separate client/server JARs contain:
 - changed and added class definitions;
 - explicit `addedClasses` and `deletedClasses` sets;
 - parent definitions required for validation and rollback;
-- shape-compatible tombstones for class retirement;
+- compatibility retirement definitions retained for old artifact replay;
 - changed resources and exact resource deletion filters;
 - parent/current revision, world/server/patch identity, hashes, and lifecycle hooks.
 
-The JVM cannot remove one loaded class. A deleted or world-only class is therefore redefined to a tombstone that preserves its JVM shape and throws `NoClassDefFoundError` from executable bodies. It can later be reactivated by another revision/world.
+The JVM cannot remove one loaded class, and arbitrary live objects cannot be proven unreachable. Deletion therefore removes future source/registry reachability but leaves the class's last executable definition resident. This fail-safe rule prevents live menus, entities, callbacks, lambdas, method handles, active frames, and third-party references from being converted into `NoClassDefFoundError`. A later revision/world can redefine the retained identity normally.
 
 ## Lifecycle hooks
 
@@ -82,14 +84,14 @@ No-argument forms are also accepted. Hook sources are automatically included in 
 9. Run `commit`; peers report `COMMITTED`.
 10. Persist the source snapshot and manifest, send `FINALIZE`, and seal the revision into the world-exit rollback chain.
 
-Any failure before finalization sends `ABORT`. Class definitions are restored, new classes are retired, rollback hooks receive their checkpoints, and client/server resource overlays return to the committed manifest.
+Any failure before finalization sends `ABORT`. Modified definitions are restored, new classes lose their registered/cache reachability but remain executable for existing references, rollback hooks receive their checkpoints, and client/server resource overlays return to the committed manifest.
 
 ## Recovery and world switching
 
 - `patches/transaction.json` records staged, scheduled, publishing, committing, and rollback phases.
 - On restart, the committed manifest remains authoritative. An interrupted uncommitted revision runs its dedicated rollback hook without replaying migration.
-- Committed revisions retain reversible definition chains in process memory. Leaving a world unwinds them in reverse order, restores base classes, tombstones world-only classes, and retires published registry identities without reusing their IDs.
-- Reopening a world replays its immutable ordered artifacts. Remote client disconnect also clears in-flight transactions and restores base code/resources.
+- Committed revisions retain reversible definition chains in process memory. Leaving a world unwinds them in reverse order, restores base classes, safely retains world-only class bodies, and retires published registry identities without reusing their IDs.
+- Client teardown runs only after its old screen/level are detached and an integrated server has completely stopped and drained live world objects. Reopening a world then replays its immutable ordered artifacts.
 
 ## Regression tests
 
@@ -98,4 +100,4 @@ tests/code-generality/run.sh
 tests/jvm/run.sh jvm/linux-x64
 ```
 
-The generality suite covers arbitrary client/server inputs, dependency closure, content-addressed cache hits, resource movement, structural class evolution, live/static migration, compile and migration failures, rollback, class retirement, world switching, reconnect replay, and JFR-enabled execution. The JVM suite covers methods, fields, constructors, interfaces, active frames, C2, attach, and JFR behavior.
+The generality suite covers arbitrary client/server inputs, shared-contract divergence/tampering, dependency closure, content-addressed cache hits, resource movement, structural class evolution, live/static migration, compile and migration failures, rollback, live-object-safe retirement, world switching, reconnect replay, and JFR-enabled execution. The JVM suite covers methods, fields, constructors, interfaces, active frames, C2, attach, and JFR behavior.

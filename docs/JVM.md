@@ -84,4 +84,4 @@ Validation date: 2026-08-01.
 | Linux x86-64 | Pass | Pass |
 | Windows x86-64 | Pass | Deferred until the Windows launcher (main TODO item 5) |
 
-Loaded classes cannot be individually unloaded by any JVM. Logical class removal uses a tombstone definition; physical unloading occurs when its defining classloader becomes unreachable.
+Loaded classes cannot be individually unloaded by any JVM. Allcraft removes a deleted class from future source/registry reachability but retains its last executable definition so existing objects and active frames remain safe. Physical unloading is unavailable because world artifacts share Minecraft's process-lifetime system classloader.

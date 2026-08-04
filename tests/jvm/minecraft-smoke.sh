@@ -58,6 +58,22 @@ for test_name in "${runtime_tests[@]}"; do
     recent="$(tail -n +"$first_line" "$log")"
     grep -Fq "[Allcraft] PASS $test_name:" <<<"$recent"
     "$repo_root/scripts/linux/ipc.sh" status >/dev/null
+    if [[ "$test_name" == "lapis-crafting-table" ]]; then
+        status="$($repo_root/scripts/linux/ipc.sh status)"
+        read -r use_x use_y use_z < <(python3 -c \
+            'import json,math,sys; s=json.load(sys.stdin); print(math.floor(s["x"])+2, math.floor(s["y"]), math.floor(s["z"]))' \
+            <<<"$status")
+        "$repo_root/scripts/linux/ipc.sh" command "setblock $use_x $use_y $use_z allcraft:lapis_crafting_table" >/dev/null
+        "$repo_root/scripts/linux/ipc.sh" use-block "$use_x" "$use_y" "$use_z" >/dev/null
+        for _ in {1..100}; do
+            status="$($repo_root/scripts/linux/ipc.sh status 2>/dev/null || true)"
+            grep -q '"screen": "RuntimeScreen"' <<<"$status" && break
+            sleep 0.1
+        done
+        # Deliberately leave the patched menu open. The normal world-exit path below must
+        # drain the integrated server and live menu before any runtime revision is retired.
+        grep -q '"screen": "RuntimeScreen"' <<<"$status"
+    fi
 done
 
 "$jdk/bin/jcmd" "$pid" JFR.stop name=AllcraftSmoke >/dev/null

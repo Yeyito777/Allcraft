@@ -318,19 +318,53 @@ public final class AllcraftPatchCompiler {
         return List.of(
             editGenerated(
                 sourceRoot,
+                "shared/net/minecraft/allcraft/generated/SharedRegistryBlock.java",
+                registryBlockSource()
+            ),
+            editGenerated(
+                sourceRoot,
                 "client/net/minecraft/allcraft/generated/ClientRegistryBlock.java",
-                registryBlockSource("ClientRegistryBlock", "client")
+                registryBlockWrapper("ClientRegistryBlock", "client")
             ),
             editGenerated(
                 sourceRoot,
                 "server/net/minecraft/allcraft/generated/ServerRegistryBlock.java",
-                registryBlockSource("ServerRegistryBlock", "server")
+                registryBlockWrapper("ServerRegistryBlock", "server")
             )
         );
     }
 
     private static List<SourceEdit> newItemEdits(Path sourceRoot) throws IOException {
         return List.of(
+            editGenerated(
+                sourceRoot,
+                "shared/net/minecraft/allcraft/generated/SharedNewItem.java",
+                """
+                package net.minecraft.allcraft.generated;
+
+                import net.minecraft.allcraft.AllcraftRegistries;
+                import net.minecraft.core.registries.BuiltInRegistries;
+                import net.minecraft.core.registries.Registries;
+                import net.minecraft.resources.Identifier;
+                import net.minecraft.resources.ResourceKey;
+                import net.minecraft.world.item.Item;
+
+                public final class SharedNewItem {
+                    private static final Identifier ID = Identifier.fromNamespaceAndPath("allcraft", "runtime_crystal");
+                    private static final ResourceKey<Item> KEY = ResourceKey.create(Registries.ITEM, ID);
+                    public static Item item;
+
+                    private SharedNewItem() {
+                    }
+
+                    public static void activate() {
+                        item = AllcraftRegistries.registerLazy(
+                            BuiltInRegistries.ITEM, KEY, () -> new Item(new Item.Properties().setId(KEY).stacksTo(16))
+                        );
+                    }
+                }
+                """
+            ),
             editGenerated(
                 sourceRoot,
                 "client/net/minecraft/allcraft/generated/ClientNewItem.java",
@@ -346,29 +380,57 @@ public final class AllcraftPatchCompiler {
 
     private static String newItemSource(String className, String side) {
         return "package net.minecraft.allcraft.generated;\n\n"
-            + "import net.minecraft.allcraft.AllcraftRegistries;\n"
             + "import net.minecraft.core.registries.BuiltInRegistries;\n"
-            + "import net.minecraft.core.registries.Registries;\n"
-            + "import net.minecraft.resources.Identifier;\n"
-            + "import net.minecraft.resources.ResourceKey;\n"
-            + "import net.minecraft.world.item.Item;\n\n"
+            + "\n"
             + "public final class " + className + " {\n"
-            + "    private static final Identifier ID = Identifier.fromNamespaceAndPath(\"allcraft\", \"runtime_crystal\");\n"
-            + "    private static final ResourceKey<Item> KEY = ResourceKey.create(Registries.ITEM, ID);\n"
-            + "    public static Item item;\n\n"
             + "    private " + className + "() {\n"
             + "    }\n\n"
             + "    public static void allcraftActivate() {\n"
-            + "        item = AllcraftRegistries.registerLazy(\n"
-            + "            BuiltInRegistries.ITEM, KEY, () -> new Item(new Item.Properties().setId(KEY).stacksTo(16))\n"
-            + "        );\n"
-            + "        System.setProperty(\"allcraft.new-item." + side + "\", Integer.toString(BuiltInRegistries.ITEM.getId(item)));\n"
+            + "        SharedNewItem.activate();\n"
+            + "        System.setProperty(\"allcraft.new-item." + side + "\", Integer.toString(BuiltInRegistries.ITEM.getId(SharedNewItem.item)));\n"
             + "    }\n"
             + "}\n";
     }
 
     private static List<SourceEdit> newParticleEdits(Path sourceRoot) throws IOException {
         return List.of(
+            editGenerated(
+                sourceRoot,
+                "shared/net/minecraft/allcraft/generated/SharedNewParticle.java",
+                """
+                package net.minecraft.allcraft.generated;
+
+                import net.minecraft.allcraft.AllcraftRegistries;
+                import net.minecraft.core.particles.ParticleType;
+                import net.minecraft.core.particles.SimpleParticleType;
+                import net.minecraft.core.registries.BuiltInRegistries;
+                import net.minecraft.core.registries.Registries;
+                import net.minecraft.resources.Identifier;
+                import net.minecraft.resources.ResourceKey;
+
+                public final class SharedNewParticle {
+                    private static final Identifier ID = Identifier.fromNamespaceAndPath("allcraft", "runtime_spark");
+                    private static final ResourceKey<ParticleType<?>> KEY = ResourceKey.create(Registries.PARTICLE_TYPE, ID);
+                    public static SimpleParticleType type;
+
+                    private SharedNewParticle() {
+                    }
+
+                    @SuppressWarnings("unchecked")
+                    public static void activate() {
+                        type = (SimpleParticleType)AllcraftRegistries.registerLazy(
+                            BuiltInRegistries.PARTICLE_TYPE, KEY, RuntimeParticleType::new
+                        );
+                    }
+
+                    public static final class RuntimeParticleType extends SimpleParticleType {
+                        public RuntimeParticleType() {
+                            super(false);
+                        }
+                    }
+                }
+                """
+            ),
             editGenerated(
                 sourceRoot,
                 "client/net/minecraft/allcraft/generated/ClientNewParticle.java",
@@ -384,52 +446,34 @@ public final class AllcraftPatchCompiler {
 
     private static String newParticleSource(String className, String side, boolean client) {
         return "package net.minecraft.allcraft.generated;\n\n"
-            + "import net.minecraft.allcraft.AllcraftRegistries;\n"
             + (client ? "import net.minecraft.client.Minecraft;\nimport net.minecraft.client.particle.FlameParticle;\n" : "")
-            + "import net.minecraft.core.particles.ParticleType;\n"
-            + "import net.minecraft.core.particles.SimpleParticleType;\n"
             + "import net.minecraft.core.registries.BuiltInRegistries;\n"
-            + "import net.minecraft.core.registries.Registries;\n"
-            + "import net.minecraft.resources.Identifier;\n"
-            + "import net.minecraft.resources.ResourceKey;\n\n"
+            + "\n"
             + "public final class " + className + " {\n"
-            + "    private static final Identifier ID = Identifier.fromNamespaceAndPath(\"allcraft\", \"runtime_spark\");\n"
-            + "    private static final ResourceKey<ParticleType<?>> KEY = ResourceKey.create(Registries.PARTICLE_TYPE, ID);\n"
-            + "    public static SimpleParticleType type;\n\n"
             + "    private " + className + "() {\n"
             + "    }\n\n"
             + "    public static void allcraftActivate() {\n"
-            + "        type = (SimpleParticleType)AllcraftRegistries.registerLazy(\n"
-            + "            BuiltInRegistries.PARTICLE_TYPE, KEY, RuntimeParticleType::new\n"
-            + "        );\n"
-            + (client ? "        Minecraft.getInstance().particleEngine.allcraftRegister(type, FlameParticle.Provider::new);\n" : "")
-            + "        System.setProperty(\"allcraft.new-particle." + side + "\", Integer.toString(BuiltInRegistries.PARTICLE_TYPE.getId(type)));\n"
-            + "    }\n\n"
-            + "    public static final class RuntimeParticleType extends SimpleParticleType {\n"
-            + "        public RuntimeParticleType() {\n"
-            + "            super(false);\n"
-            + "        }\n"
+            + "        SharedNewParticle.activate();\n"
+            + (client ? "        Minecraft.getInstance().particleEngine.allcraftRegister(SharedNewParticle.type, FlameParticle.Provider::new);\n" : "")
+            + "        System.setProperty(\"allcraft.new-particle." + side + "\", Integer.toString(BuiltInRegistries.PARTICLE_TYPE.getId(SharedNewParticle.type)));\n"
             + "    }\n"
             + "}\n";
     }
 
     private static List<SourceEdit> newMobEdits(Path sourceRoot) throws IOException {
         return List.of(
+            editGenerated(sourceRoot, "shared/net/minecraft/allcraft/generated/SharedNewMob.java", sharedNewMobSource()),
             editGenerated(sourceRoot, "client/net/minecraft/allcraft/generated/ClientNewMob.java", newMobSource("ClientNewMob", "client", true)),
             editGenerated(sourceRoot, "server/net/minecraft/allcraft/generated/ServerNewMob.java", newMobSource("ServerNewMob", "server", false))
         );
     }
 
-    private static String newMobSource(String className, String side, boolean client) {
-        String clientImports = client
-            ? "import net.minecraft.client.renderer.entity.CowRenderer;\nimport net.minecraft.client.renderer.entity.EntityRenderers;\n"
-            : "";
-        String clientRegistration = client ? "        EntityRenderers.register(type, CowRenderer::new);\n" : "";
-        return ("""
+    private static String sharedNewMobSource() {
+        return """
             package net.minecraft.allcraft.generated;
 
             import net.minecraft.allcraft.AllcraftRegistries;
-            %simport net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.core.registries.BuiltInRegistries;
             import net.minecraft.core.registries.Registries;
             import net.minecraft.resources.Identifier;
             import net.minecraft.resources.ResourceKey;
@@ -443,16 +487,16 @@ public final class AllcraftPatchCompiler {
             import net.minecraft.world.level.Level;
             import net.minecraft.world.level.levelgen.Heightmap;
 
-            public final class %s {
+            public final class SharedNewMob {
                 private static final Identifier ID = Identifier.fromNamespaceAndPath("allcraft", "runtime_cow");
                 private static final ResourceKey<EntityType<?>> KEY = ResourceKey.create(Registries.ENTITY_TYPE, ID);
                 public static EntityType<RuntimeCow> type;
 
-                private %s() {
+                private SharedNewMob() {
                 }
 
                 @SuppressWarnings("unchecked")
-                public static void allcraftActivate() {
+                public static void activate() {
                     type = (EntityType<RuntimeCow>)(EntityType<?>)AllcraftRegistries.registerLazy(
                         BuiltInRegistries.ENTITY_TYPE, KEY,
                         () -> EntityType.Builder.of(RuntimeCow::new, MobCategory.CREATURE)
@@ -462,13 +506,34 @@ public final class AllcraftPatchCompiler {
                     SpawnPlacements.register(
                         type, SpawnPlacementTypes.ON_GROUND, Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, Animal::checkAnimalSpawnRules
                     );
-            %s        System.setProperty("allcraft.new-mob.%s", Integer.toString(BuiltInRegistries.ENTITY_TYPE.getId(type)));
                 }
 
                 public static final class RuntimeCow extends Cow {
                     public RuntimeCow(EntityType<? extends Cow> type, Level level) {
                         super(type, level);
                     }
+                }
+            }
+            """;
+    }
+
+    private static String newMobSource(String className, String side, boolean client) {
+        String clientImports = client
+            ? "import net.minecraft.client.renderer.entity.CowRenderer;\nimport net.minecraft.client.renderer.entity.EntityRenderers;\n"
+            : "";
+        String clientRegistration = client ? "        EntityRenderers.register(SharedNewMob.type, CowRenderer::new);\n" : "";
+        return ("""
+            package net.minecraft.allcraft.generated;
+
+            %simport net.minecraft.core.registries.BuiltInRegistries;
+
+            public final class %s {
+                private %s() {
+                }
+
+                public static void allcraftActivate() {
+                    SharedNewMob.activate();
+            %s        System.setProperty("allcraft.new-mob.%s", Integer.toString(BuiltInRegistries.ENTITY_TYPE.getId(SharedNewMob.type)));
                 }
             }
             """).formatted(clientImports, className, className, clientRegistration, side);
@@ -524,48 +589,23 @@ public final class AllcraftPatchCompiler {
         return List.of(
             editGenerated(
                 sourceRoot,
+                "shared/net/minecraft/allcraft/generated/SharedLapisCraftingTable.java",
+                lapisCraftingTableSource()
+            ),
+            editGenerated(
+                sourceRoot,
                 "client/net/minecraft/allcraft/generated/ClientLapisCraftingTable.java",
-                lapisCraftingTableSource("ClientLapisCraftingTable", "client", true)
+                lapisCraftingTableWrapper("ClientLapisCraftingTable", "client", true)
             ),
             editGenerated(
                 sourceRoot,
                 "server/net/minecraft/allcraft/generated/ServerLapisCraftingTable.java",
-                lapisCraftingTableSource("ServerLapisCraftingTable", "server", false)
+                lapisCraftingTableWrapper("ServerLapisCraftingTable", "server", false)
             )
         );
     }
 
-    private static String lapisCraftingTableSource(String className, String side, boolean client) {
-        String clientImports = client
-            ? """
-            import net.minecraft.client.gui.GuiGraphicsExtractor;
-            import net.minecraft.client.gui.screens.MenuScreens;
-            import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
-            import net.minecraft.client.renderer.RenderPipelines;
-            """
-            : "";
-        String clientTypes = client
-            ? """
-
-                public static final class RuntimeScreen extends AbstractContainerScreen<RuntimeMenu> {
-                    private static final Identifier TEXTURE = Identifier.withDefaultNamespace("textures/gui/container/crafting_table.png");
-
-                    public RuntimeScreen(RuntimeMenu menu, Inventory inventory, Component title) {
-                        super(menu, inventory, title);
-                    }
-
-                    @Override
-                    public void extractBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float a) {
-                        super.extractBackground(graphics, mouseX, mouseY, a);
-                        graphics.blit(
-                            RenderPipelines.GUI_TEXTURED, TEXTURE, this.leftPos, this.topPos,
-                            0.0F, 0.0F, this.imageWidth, this.imageHeight, 256, 256
-                        );
-                    }
-                }
-            """
-            : "";
-        String clientRegistration = client ? "        MenuScreens.register(menuType, RuntimeScreen::new);\n" : "";
+    private static String lapisCraftingTableSource() {
         return ("""
             package net.minecraft.allcraft.generated;
 
@@ -574,7 +614,7 @@ public final class AllcraftPatchCompiler {
             import java.util.Optional;
             import java.util.Set;
             import net.minecraft.allcraft.AllcraftRegistries;
-            %simport net.minecraft.core.BlockPos;
+            import net.minecraft.core.BlockPos;
             import net.minecraft.core.registries.BuiltInRegistries;
             import net.minecraft.core.registries.Registries;
             import net.minecraft.network.RegistryFriendlyByteBuf;
@@ -619,7 +659,7 @@ public final class AllcraftPatchCompiler {
             import net.minecraft.world.level.block.state.BlockState;
             import net.minecraft.world.phys.BlockHitResult;
 
-            public final class %s {
+            public final class SharedLapisCraftingTable {
                 private static final Identifier ID = Identifier.fromNamespaceAndPath("allcraft", "lapis_crafting_table");
                 private static final Identifier RECIPE_ID = Identifier.fromNamespaceAndPath("allcraft", "lapis_table");
                 private static final ResourceKey<Block> BLOCK_KEY = ResourceKey.create(Registries.BLOCK, ID);
@@ -635,11 +675,11 @@ public final class AllcraftPatchCompiler {
                 public static RecipeType<CraftingRecipe> recipeType;
                 public static RecipeSerializer<RuntimeRecipe> recipeSerializer;
 
-                private %s() {
+                private SharedLapisCraftingTable() {
                 }
 
                 @SuppressWarnings("unchecked")
-                public static void allcraftActivate() {
+                public static void activate() {
                     block = AllcraftRegistries.registerLazy(
                         BuiltInRegistries.BLOCK, BLOCK_KEY,
                         () -> new RuntimeBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.CRAFTING_TABLE).setId(BLOCK_KEY))
@@ -668,7 +708,6 @@ public final class AllcraftPatchCompiler {
                         BuiltInRegistries.RECIPE_SERIALIZER, RECIPE_SERIALIZER_KEY,
                         () -> new RecipeSerializer<>(RuntimeRecipe.MAP_CODEC, RuntimeRecipe.STREAM_CODEC)
                     );
-            %s        System.setProperty("allcraft.lapis-crafting-table.%s", Integer.toString(BuiltInRegistries.MENU.getId(menuType)));
                 }
 
                 public static final class RuntimeBlock extends Block implements EntityBlock {
@@ -851,26 +890,88 @@ public final class AllcraftPatchCompiler {
                         return recipeType;
                     }
                 }
-            %s}
-            """).formatted(clientImports, className, className, clientRegistration, side, clientTypes);
+            }
+            """);
+    }
+
+    private static String lapisCraftingTableWrapper(String className, String side, boolean client) {
+        if (!client) {
+            return "package net.minecraft.allcraft.generated;\n\n"
+                + "import net.minecraft.core.registries.BuiltInRegistries;\n\n"
+                + "public final class " + className + " {\n"
+                + "    private " + className + "() { }\n"
+                + "    public static void allcraftActivate() {\n"
+                + "        SharedLapisCraftingTable.activate();\n"
+                + "        System.setProperty(\"allcraft.lapis-crafting-table." + side + "\", Integer.toString(BuiltInRegistries.MENU.getId(SharedLapisCraftingTable.menuType)));\n"
+                + "    }\n"
+                + "}\n";
+        }
+        return """
+            package net.minecraft.allcraft.generated;
+
+            import net.minecraft.client.gui.GuiGraphicsExtractor;
+            import net.minecraft.client.gui.screens.MenuScreens;
+            import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+            import net.minecraft.client.renderer.RenderPipelines;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.Identifier;
+            import net.minecraft.world.entity.player.Inventory;
+
+            public final class ClientLapisCraftingTable {
+                private ClientLapisCraftingTable() {
+                }
+
+                public static void allcraftActivate() {
+                    SharedLapisCraftingTable.activate();
+                    MenuScreens.register(SharedLapisCraftingTable.menuType, RuntimeScreen::new);
+                    System.setProperty(
+                        "allcraft.lapis-crafting-table.client",
+                        Integer.toString(BuiltInRegistries.MENU.getId(SharedLapisCraftingTable.menuType))
+                    );
+                }
+
+                public static final class RuntimeScreen extends AbstractContainerScreen<SharedLapisCraftingTable.RuntimeMenu> {
+                    private static final Identifier TEXTURE = Identifier.withDefaultNamespace("textures/gui/container/crafting_table.png");
+
+                    public RuntimeScreen(SharedLapisCraftingTable.RuntimeMenu menu, Inventory inventory, Component title) {
+                        super(menu, inventory, title);
+                    }
+
+                    @Override
+                    public void extractBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float a) {
+                        super.extractBackground(graphics, mouseX, mouseY, a);
+                        graphics.blit(
+                            RenderPipelines.GUI_TEXTURED, TEXTURE, this.leftPos, this.topPos,
+                            0.0F, 0.0F, this.imageWidth, this.imageHeight, 256, 256
+                        );
+                    }
+                }
+            }
+            """;
     }
 
     private static List<SourceEdit> newMusicDiscEdits(Path sourceRoot) throws IOException {
         return List.of(
             editGenerated(
                 sourceRoot,
+                "shared/net/minecraft/allcraft/generated/SharedMusicDisc.java",
+                newMusicDiscSource()
+            ),
+            editGenerated(
+                sourceRoot,
                 "client/net/minecraft/allcraft/generated/ClientMusicDisc.java",
-                newMusicDiscSource("ClientMusicDisc", "client")
+                newMusicDiscWrapper("ClientMusicDisc", "client")
             ),
             editGenerated(
                 sourceRoot,
                 "server/net/minecraft/allcraft/generated/ServerMusicDisc.java",
-                newMusicDiscSource("ServerMusicDisc", "server")
+                newMusicDiscWrapper("ServerMusicDisc", "server")
             )
         );
     }
 
-    private static String newMusicDiscSource(String className, String side) {
+    private static String newMusicDiscSource() {
         return "package net.minecraft.allcraft.generated;\n\n"
             + "import net.minecraft.allcraft.AllcraftRegistries;\n"
             + "import net.minecraft.core.Holder;\n"
@@ -882,16 +983,16 @@ public final class AllcraftPatchCompiler {
             + "import net.minecraft.sounds.SoundEvent;\n"
             + "import net.minecraft.world.item.Item;\n"
             + "import net.minecraft.world.item.JukeboxSong;\n\n"
-            + "public final class " + className + " {\n"
+            + "public final class SharedMusicDisc {\n"
             + "    private static final Identifier ITEM_ID = Identifier.fromNamespaceAndPath(\"allcraft\", \"runtime_music_disc\");\n"
             + "    private static final Identifier SOUND_ID = Identifier.fromNamespaceAndPath(\"allcraft\", \"music_disc.runtime\");\n"
             + "    private static final ResourceKey<Item> ITEM_KEY = ResourceKey.create(Registries.ITEM, ITEM_ID);\n"
             + "    private static final ResourceKey<SoundEvent> SOUND_KEY = ResourceKey.create(Registries.SOUND_EVENT, SOUND_ID);\n"
             + "    private static final ResourceKey<JukeboxSong> SONG_KEY = ResourceKey.create(Registries.JUKEBOX_SONG, ITEM_ID);\n"
             + "    public static Item item;\n\n"
-            + "    private " + className + "() {\n"
+            + "    private SharedMusicDisc() {\n"
             + "    }\n\n"
-            + "    public static void allcraftActivate() {\n"
+            + "    public static void activate() {\n"
             + "        AllcraftRegistries.registerLazy(\n"
             + "            BuiltInRegistries.SOUND_EVENT, SOUND_KEY, () -> SoundEvent.createVariableRangeEvent(SOUND_ID)\n"
             + "        );\n"
@@ -904,12 +1005,23 @@ public final class AllcraftPatchCompiler {
             + "            BuiltInRegistries.ITEM, ITEM_KEY,\n"
             + "            () -> new Item(new Item.Properties().setId(ITEM_KEY).stacksTo(1).jukeboxPlayable(SONG_KEY))\n"
             + "        );\n"
-            + "        System.setProperty(\"allcraft.new-music-disc." + side + "\", Integer.toString(BuiltInRegistries.ITEM.getId(item)));\n"
             + "    }\n"
             + "}\n";
     }
 
-    private static String registryBlockSource(String className, String side) {
+    private static String newMusicDiscWrapper(String className, String side) {
+        return "package net.minecraft.allcraft.generated;\n\n"
+            + "import net.minecraft.core.registries.BuiltInRegistries;\n\n"
+            + "public final class " + className + " {\n"
+            + "    private " + className + "() { }\n"
+            + "    public static void allcraftActivate() {\n"
+            + "        SharedMusicDisc.activate();\n"
+            + "        System.setProperty(\"allcraft.new-music-disc." + side + "\", Integer.toString(BuiltInRegistries.ITEM.getId(SharedMusicDisc.item)));\n"
+            + "    }\n"
+            + "}\n";
+    }
+
+    private static String registryBlockSource() {
         return "package net.minecraft.allcraft.generated;\n\n"
             + "import net.minecraft.allcraft.AllcraftRegistries;\n"
             + "import net.minecraft.core.registries.BuiltInRegistries;\n"
@@ -921,15 +1033,15 @@ public final class AllcraftPatchCompiler {
             + "import net.minecraft.world.level.block.Block;\n"
             + "import net.minecraft.world.level.block.Blocks;\n"
             + "import net.minecraft.world.level.block.state.BlockBehaviour;\n\n"
-            + "public final class " + className + " {\n"
+            + "public final class SharedRegistryBlock {\n"
             + "    private static final Identifier ID = Identifier.fromNamespaceAndPath(\"allcraft\", \"runtime_block\");\n"
             + "    private static final ResourceKey<Block> BLOCK_KEY = ResourceKey.create(Registries.BLOCK, ID);\n"
             + "    private static final ResourceKey<Item> ITEM_KEY = ResourceKey.create(Registries.ITEM, ID);\n"
             + "    public static Block block;\n"
             + "    public static Item item;\n\n"
-            + "    private " + className + "() {\n"
+            + "    private SharedRegistryBlock() {\n"
             + "    }\n\n"
-            + "    public static void allcraftActivate() {\n"
+            + "    public static void activate() {\n"
             + "        block = AllcraftRegistries.registerLazy(\n"
             + "            BuiltInRegistries.BLOCK, BLOCK_KEY,\n"
             + "            () -> new Block(BlockBehaviour.Properties.ofFullCopy(Blocks.DIAMOND_BLOCK).setId(BLOCK_KEY))\n"
@@ -938,7 +1050,18 @@ public final class AllcraftPatchCompiler {
             + "            BuiltInRegistries.ITEM, ITEM_KEY,\n"
             + "            () -> new BlockItem(block, new Item.Properties().setId(ITEM_KEY).useBlockDescriptionPrefix())\n"
             + "        );\n"
-            + "        System.setProperty(\"allcraft.registry-block." + side + "\", Integer.toString(BuiltInRegistries.BLOCK.getId(block)));\n"
+            + "    }\n"
+            + "}\n";
+    }
+
+    private static String registryBlockWrapper(String className, String side) {
+        return "package net.minecraft.allcraft.generated;\n\n"
+            + "import net.minecraft.core.registries.BuiltInRegistries;\n\n"
+            + "public final class " + className + " {\n"
+            + "    private " + className + "() { }\n"
+            + "    public static void allcraftActivate() {\n"
+            + "        SharedRegistryBlock.activate();\n"
+            + "        System.setProperty(\"allcraft.registry-block." + side + "\", Integer.toString(BuiltInRegistries.BLOCK.getId(SharedRegistryBlock.block)));\n"
             + "    }\n"
             + "}\n";
     }
@@ -1504,13 +1627,29 @@ public final class AllcraftPatchCompiler {
                 yield sources;
             }
             case "new-class" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientRuntimeProbe.java"));
-            case "registry-block" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientRegistryBlock.java"));
-            case "new-item" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewItem.java"));
-            case "new-particle" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewParticle.java"));
-            case "new-mob" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewMob.java"));
-            case "new-music-disc" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientMusicDisc.java"));
+            case "registry-block" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedRegistryBlock.java"),
+                sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientRegistryBlock.java")
+            );
+            case "new-item" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedNewItem.java"),
+                sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewItem.java")
+            );
+            case "new-particle" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedNewParticle.java"),
+                sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewParticle.java")
+            );
+            case "new-mob" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedNewMob.java"),
+                sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewMob.java")
+            );
+            case "new-music-disc" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedMusicDisc.java"),
+                sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientMusicDisc.java")
+            );
             case "new-keybind" -> List.of(sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientNewKeybind.java"));
             case "lapis-crafting-table" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedLapisCraftingTable.java"),
                 sourceRoot.resolve("client/net/minecraft/allcraft/generated/ClientLapisCraftingTable.java")
             );
             default -> List.of();
@@ -1521,12 +1660,28 @@ public final class AllcraftPatchCompiler {
         return switch (testName) {
             case "no-world-gen" -> List.of(sourceRoot.resolve(SERVER_NOISE_GENERATOR), sourceRoot.resolve(SERVER_CHUNK_GENERATOR));
             case "new-class" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerRuntimeProbe.java"));
-            case "registry-block" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerRegistryBlock.java"));
-            case "new-item" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerNewItem.java"));
-            case "new-particle" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerNewParticle.java"));
-            case "new-mob" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerNewMob.java"));
-            case "new-music-disc" -> List.of(sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerMusicDisc.java"));
+            case "registry-block" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedRegistryBlock.java"),
+                sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerRegistryBlock.java")
+            );
+            case "new-item" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedNewItem.java"),
+                sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerNewItem.java")
+            );
+            case "new-particle" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedNewParticle.java"),
+                sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerNewParticle.java")
+            );
+            case "new-mob" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedNewMob.java"),
+                sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerNewMob.java")
+            );
+            case "new-music-disc" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedMusicDisc.java"),
+                sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerMusicDisc.java")
+            );
             case "lapis-crafting-table" -> List.of(
+                sourceRoot.resolve("shared/net/minecraft/allcraft/generated/SharedLapisCraftingTable.java"),
                 sourceRoot.resolve("server/net/minecraft/allcraft/generated/ServerLapisCraftingTable.java")
             );
             default -> List.of();

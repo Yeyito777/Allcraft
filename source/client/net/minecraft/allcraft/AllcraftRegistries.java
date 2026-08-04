@@ -39,6 +39,7 @@ import net.minecraft.world.level.material.FluidState;
 public final class AllcraftRegistries {
     private static final Gson GSON = new Gson();
     private static final ThreadLocal<Transaction> ACTIVE = new ThreadLocal<>();
+    private static final StackWalker CALLERS = StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
 
     private AllcraftRegistries() {
     }
@@ -101,6 +102,10 @@ public final class AllcraftRegistries {
 
     /** Returns an existing value or constructs and registers a new one under the active revision. */
     public static <T> T registerLazy(Registry<T> registry, ResourceKey<T> key, Supplier<? extends T> factory) {
+        Transaction transaction = ACTIVE.get();
+        if (transaction != null) {
+            transaction.validateCanonicalObject(factory, "registry factory");
+        }
         Optional<T> existing = registry.getOptional(key);
         if (existing.isPresent()) {
             claim(registry, key, registry.getId(existing.get()), "ensure");
@@ -109,11 +114,18 @@ public final class AllcraftRegistries {
             return existing.get();
         }
         T value = factory.get();
+        if (transaction != null) {
+            transaction.validateCanonicalObject(value, "registry value");
+        }
         Holder.Reference<T> holder = ((WritableRegistry<T>)registry).register(key, value, RegistrationInfo.BUILT_IN);
         return holder.value();
     }
 
     public static <T> T register(Registry<T> registry, ResourceKey<T> key, T value) {
+        Transaction transaction = ACTIVE.get();
+        if (transaction != null) {
+            transaction.validateCanonicalObject(value, "registry value");
+        }
         Optional<T> existing = registry.getOptional(key);
         if (existing.isPresent()) {
             claim(registry, key, registry.getId(existing.get()), "ensure");
@@ -141,6 +153,10 @@ public final class AllcraftRegistries {
     }
 
     public static <T> T replace(Registry<T> registry, ResourceKey<T> key, T value) {
+        Transaction transaction = ACTIVE.get();
+        if (transaction != null) {
+            transaction.validateCanonicalObject(value, "registry replacement");
+        }
         return mapped(registry).allcraftReplace(key, value, RegistrationInfo.BUILT_IN);
     }
 
@@ -179,6 +195,7 @@ public final class AllcraftRegistries {
         if (transaction == null || transaction.replaying) {
             throw new IllegalStateException("Frozen registry mutation requires an active Allcraft revision transaction");
         }
+        transaction.validateSharedCaller();
         PlanEntry actual = new PlanEntry(operation, registry, key, proposedId);
         if (transaction.expectedPlan != null) {
             if (transaction.expectedIndex >= transaction.expectedPlan.size()) {
@@ -340,6 +357,9 @@ public final class AllcraftRegistries {
         private int expectedIndex;
         private int mutationCount;
         private RegistryAccess registryAccess;
+        private Set<String> sharedClasses = Set.of();
+        private Set<String> patchClasses = Set.of();
+        private boolean enforceSharedCallers;
         private boolean replaying;
         private boolean publicationClosed;
         private boolean rolledBack;
@@ -349,6 +369,52 @@ public final class AllcraftRegistries {
             this.side = side;
             this.revision = revision;
             this.patchId = patchId;
+        }
+
+        public synchronized void sharedClasses(Set<String> classes, Set<String> patchClasses, boolean enforce) {
+            if (!this.plan.isEmpty() || this.publicationClosed || this.rolledBack) {
+                throw new IllegalStateException("Shared logical class contract was configured after publication began");
+            }
+            this.sharedClasses = Set.copyOf(classes);
+            this.patchClasses = Set.copyOf(patchClasses);
+            this.enforceSharedCallers = enforce;
+        }
+
+        private void validateCanonicalObject(Object value, String role) {
+            if (!this.enforceSharedCallers || value == null) {
+                return;
+            }
+            Class<?> type = value.getClass();
+            Class<?> host = type.getNestHost();
+            String owner = host.getName();
+            if (this.patchClasses.contains(owner) && !this.sharedClasses.contains(owner)) {
+                throw new IllegalStateException(
+                    "Synchronized " + role + " originates in side-only class " + owner + "; its logical type/factory must live in shared/"
+                );
+            }
+        }
+
+        private void validateSharedCaller() {
+            if (!this.enforceSharedCallers) {
+                return;
+            }
+            String caller = CALLERS.walk(frames -> frames
+                .map(StackWalker.StackFrame::getDeclaringClass)
+                .filter(type -> type != AllcraftRegistries.class && !type.getName().startsWith(AllcraftRegistries.class.getName() + "$"))
+                .filter(type -> !MappedRegistry.class.isAssignableFrom(type))
+                .filter(type -> type != Registry.class && type != WritableRegistry.class)
+                .map(Class::getName)
+                .findFirst()
+                .orElse("unknown"));
+            boolean shared = this.sharedClasses.contains(caller)
+                || this.sharedClasses.stream().anyMatch(name -> caller.startsWith(name + "$$Lambda"));
+            if (!shared) {
+                throw new IllegalStateException(
+                    "Synchronized registry mutation originated in side-only class "
+                        + caller
+                        + "; logical registration must originate from canonical shared/ source"
+                );
+            }
         }
 
         public synchronized void registryAccess(RegistryAccess registryAccess) {

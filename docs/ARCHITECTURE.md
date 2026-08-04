@@ -105,6 +105,8 @@ patches/
 - The bundled Allcraft Java agent exposes JVM `Instrumentation`.
 - Loaded classes are atomically redefined with JetBrains Runtime enhanced class redefinition.
 - New classes are appended to Minecraft's system classloader and loaded without restarting the game.
+- Registry/network-facing logical classes are compiled from `shared/`; side artifacts carry the same hashed class contract and side-only registry factories are rejected.
+- Deleted/world-only classes remain executable but logically unreachable because arbitrary live Java references cannot be proven absent safely.
 - Byte-identical definitions are skipped instead of forcing another JVM-wide redefinition.
 - Optional static artifact entrypoints can initialize newly added code at activation.
 - Before activation, a background coordinator compiles authoritative world source into separate client and server JARs.
@@ -112,6 +114,7 @@ patches/
 - Compiler outputs are cached by source, classpath, compiler, and side; only changed inputs invalidate them.
 - At tick `N`, the server applies its server JAR and clients apply the corresponding client JAR.
 - Opening an evolved single-player world restores its ordered server and integrated-client artifacts automatically.
+- World exit retires runtime code only after the client view and integrated server have fully drained their live objects.
 
 Clients never run a Java build when joining or receiving an update.
 
