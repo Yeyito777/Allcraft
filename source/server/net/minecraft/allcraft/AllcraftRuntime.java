@@ -79,12 +79,11 @@ public final class AllcraftRuntime {
         verifyClasses(classes);
         verifyClasses(tombstones);
         verifyClasses(parentDefinitions);
-        validateLifecycle(classes, hooks, entrypoints);
-        validateSharedContract(descriptor, classes, parentDefinitions, addedClasses, sharedClasses);
-
         Instrumentation instrumentation = AllcraftAgent.instrumentation();
         ClassLoader gameLoader = AllcraftRuntime.class.getClassLoader();
         Map<String, Class<?>> loaded = loadedClasses(instrumentation, gameLoader);
+        validateLifecycle(classes, hooks, entrypoints, gameLoader);
+        validateSharedContract(descriptor, classes, parentDefinitions, addedClasses, sharedClasses);
         Map<String, byte[]> previous = new LinkedHashMap<>();
         for (String name : classes.keySet()) {
             Class<?> type = loaded.get(name);
@@ -528,7 +527,9 @@ public final class AllcraftRuntime {
         }
     }
 
-    private static void validateLifecycle(Map<String, byte[]> classes, Hooks hooks, List<String> entrypoints) throws IOException {
+    private static void validateLifecycle(
+        Map<String, byte[]> classes, Hooks hooks, List<String> entrypoints, ClassLoader loader
+    ) throws IOException {
         validateHookMethods(classes, hooks.prepare, "allcraftPrepare");
         validateHookMethods(classes, hooks.migrate, "allcraftMigrate");
         validateHookMethods(classes, hooks.commit, "allcraftCommit");
@@ -537,6 +538,20 @@ public final class AllcraftRuntime {
             byte[] bytes = classes.get(className);
             if (bytes != null && !hasMethod(bytes, "allcraftActivate", "()V")) {
                 throw new IOException("Staged entrypoint " + className + " has no static-compatible allcraftActivate() method");
+            }
+        }
+        Set<String> declared = new LinkedHashSet<>();
+        declared.addAll(hooks.prepare);
+        declared.addAll(hooks.migrate);
+        declared.addAll(hooks.commit);
+        declared.addAll(hooks.rollback);
+        declared.addAll(entrypoints);
+        for (String className : declared) {
+            if (classes.containsKey(className)) continue;
+            try {
+                Class.forName(className, false, loader);
+            } catch (ClassNotFoundException | LinkageError e) {
+                throw new IOException("Staged lifecycle declares unavailable class " + className, e);
             }
         }
     }

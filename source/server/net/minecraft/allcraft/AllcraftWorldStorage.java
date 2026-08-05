@@ -42,7 +42,11 @@ public final class AllcraftWorldStorage {
             cloneSourceIfMissing(sourceRoot, worldSource);
             refreshExocortexTools(sourceRoot, worldSource);
             initializePatchStorage(worldRoot.resolve("patches"), serverId);
+            JsonObject manifest = readJson(worldRoot.resolve("patches/manifest.json"));
+            long revision = manifest.get("currentRevision").getAsLong();
+            AllcraftSourceRepository.initialize(worldRoot, revision);
             AllcraftRevisionBuilder.initializeBaseline(worldRoot);
+            AllcraftAiJobs.initializeWorld(worldRoot);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to initialize Allcraft storage for world " + worldRoot, e);
         }

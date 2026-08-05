@@ -10,7 +10,7 @@ Allcraft works like a Roblox-style engine and place:
 - Clients receive compiled world overlays and assets; they never compile server patches.
 - Single-player uses the same design through Minecraft's integrated server.
 
-The current `/allcraft ai <request>` command and its conversation-scoped semantic tools are documented in [AI-COMMAND.md](AI-COMMAND.md). The command-to-conversation bridge is implemented; parallel worktree integration remains a later phase.
+The `/allcraft ai <request>` worktree/build/retry pipeline and its conversation-scoped semantic tools are documented in [AI-COMMAND.md](AI-COMMAND.md).
 
 ## Roles
 
@@ -55,11 +55,14 @@ allcraft/
 
 ```text
 saves/<world>/
-├── source/                  # authoritative editable world source
+├── source/                  # Git-backed authoritative world source
+│   ├── .git/                # finalized revision refs and canonical history
+│   └── .worktrees/          # ignored private AI job checkouts
 ├── patches/
 │   ├── manifest.json        # serverId, worldId, base revision, current revision
 │   ├── source/              # ordered source diffs / commits
 │   ├── build-cache/         # content-addressed client/server compiler outputs
+│   ├── ai/jobs/             # persistent AI state and diagnostics
 │   └── artifacts/
 │       ├── client/          # compiled client deltas and cumulative overlays
 │       └── server/          # compiled server deltas and cumulative overlays
@@ -164,6 +167,16 @@ See [REGISTRY-EVOLUTION.md](REGISTRY-EVOLUTION.md) for the mutation API and iden
 The activation tick is a live protocol message, not part of the permanent revision manifest.
 
 See [CODE-REVISIONS.md](CODE-REVISIONS.md) for artifact, migration, retirement, rollback, and crash-recovery details.
+
+## AI source integration
+
+- Up to 32 Exocortex turns may edit separate linked worktrees concurrently.
+- Each world has one ordered integration reservation held through distributed `FINALIZE`.
+- Candidates rebase onto the latest finalized source and compile from their private checkout.
+- Canonical source does not move during AI editing, conflict repair, or compilation.
+- At commit, `allcraft/main` fast-forwards to the validated candidate and `refs/allcraft/revisions/<n>` records the source selected by the world manifest.
+- Publication abort restores the parent source ref; restart recovery also resets source to the manifest-selected ref.
+- Compiler, merge, contract, and activation diagnostics return to the same persistent Exocortex conversation automatically.
 
 ## Security scope
 

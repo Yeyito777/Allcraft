@@ -51,6 +51,7 @@ import net.minecraft.ReportedException;
 import net.minecraft.SharedConstants;
 import net.minecraft.SystemReport;
 import net.minecraft.allcraft.AllcraftPatchServer;
+import net.minecraft.allcraft.AllcraftAiJobs;
 import net.minecraft.allcraft.AllcraftWorldStorage;
 import net.minecraft.commands.CommandSource;
 import net.minecraft.commands.CommandSourceStack;
@@ -642,6 +643,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
    }
 
    protected void stopServer() {
+      AllcraftAiJobs.stop(this);
+      AllcraftPatchServer.stop(this);
       this.packetProcessor.close();
       if (this.metricsRecorder.isRecording()) {
          this.cancelRecordingMetrics();

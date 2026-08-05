@@ -3,6 +3,7 @@ package net.minecraft.server.commands;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.allcraft.AllcraftAiLauncher;
+import net.minecraft.allcraft.AllcraftAiJobs;
 import net.minecraft.allcraft.AllcraftPatchServer;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -34,6 +35,34 @@ public final class AllcraftCommand {
                 .then(
                     Commands.literal("ai")
                         .executes(context -> AllcraftAiLauncher.start(context.getSource(), ""))
+                        .then(
+                            Commands.literal("status")
+                                .executes(context -> AllcraftAiJobs.status(context.getSource(), ""))
+                                .then(
+                                    Commands.argument("job-id", StringArgumentType.word())
+                                        .executes(context -> AllcraftAiJobs.status(
+                                            context.getSource(), StringArgumentType.getString(context, "job-id")
+                                        ))
+                                )
+                        )
+                        .then(
+                            Commands.literal("cancel")
+                                .then(
+                                    Commands.argument("job-id", StringArgumentType.word())
+                                        .executes(context -> AllcraftAiJobs.cancel(
+                                            context.getSource(), StringArgumentType.getString(context, "job-id")
+                                        ))
+                                )
+                        )
+                        .then(
+                            Commands.literal("retry")
+                                .then(
+                                    Commands.argument("job-id", StringArgumentType.word())
+                                        .executes(context -> AllcraftAiJobs.retry(
+                                            context.getSource(), StringArgumentType.getString(context, "job-id")
+                                        ))
+                                )
+                        )
                         .then(
                             Commands.argument("request", StringArgumentType.greedyString())
                                 .executes(

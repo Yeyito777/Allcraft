@@ -58,6 +58,7 @@ public final class AllcraftPatchServer {
     private static final Map<MinecraftServer, CompilationJob> COMPILING_TESTS = new IdentityHashMap<>();
     private static final Map<MinecraftServer, ResourceRestore> PENDING_RESOURCE_RESTORES = new IdentityHashMap<>();
     private static final Map<MinecraftServer, CompletableFuture<Void>> ACTIVE_RESOURCE_RESTORES = new IdentityHashMap<>();
+    private static final Map<MinecraftServer, String> EXTERNAL_RESERVATIONS = new IdentityHashMap<>();
 
     private AllcraftPatchServer() {
     }
@@ -69,7 +70,7 @@ public final class AllcraftPatchServer {
             return 0;
         }
 
-        if (ACTIVE_TESTS.containsKey(server) || COMPILING_TESTS.containsKey(server)) {
+        if (isRevisionBusy(server)) {
             source.sendFailure(Component.literal("An Allcraft patch test is already running"));
             return 0;
         }
@@ -104,7 +105,7 @@ public final class AllcraftPatchServer {
     /** Production entrypoint: build whatever has changed in the authoritative world source. */
     public static int startApply(CommandSourceStack source, String label) {
         MinecraftServer server = source.getServer();
-        if (ACTIVE_TESTS.containsKey(server) || COMPILING_TESTS.containsKey(server)) {
+        if (isRevisionBusy(server)) {
             source.sendFailure(Component.literal("An Allcraft revision is already running"));
             return 0;
         }
@@ -130,6 +131,109 @@ public final class AllcraftPatchServer {
         return 1;
     }
 
+    public static boolean isRevisionBusy(MinecraftServer server) {
+        return ACTIVE_TESTS.containsKey(server)
+            || COMPILING_TESTS.containsKey(server)
+            || EXTERNAL_RESERVATIONS.containsKey(server)
+            || PENDING_RESOURCE_RESTORES.containsKey(server)
+            || ACTIVE_RESOURCE_RESTORES.containsKey(server);
+    }
+
+    public static boolean reserveRevision(MinecraftServer server, String runId) {
+        if (isRevisionBusy(server)) return false;
+        EXTERNAL_RESERVATIONS.put(server, runId);
+        return true;
+    }
+
+    public static void releaseRevision(MinecraftServer server, String runId) {
+        if (runId.equals(EXTERNAL_RESERVATIONS.get(server))) EXTERNAL_RESERVATIONS.remove(server);
+    }
+
+    /** Publishes artifacts that were already built from a private source checkout. */
+    public static boolean publishPrepared(
+        MinecraftServer server, AllcraftRevisionBuilder.PreparedRevision prepared, RevisionListener listener
+    ) {
+        String reservation = EXTERNAL_RESERVATIONS.get(server);
+        if (!prepared.runId().equals(reservation)
+            || ACTIVE_TESTS.containsKey(server)
+            || COMPILING_TESTS.containsKey(server)
+            || server.getPlayerList().getPlayerCount() == 0) {
+            return false;
+        }
+        EXTERNAL_RESERVATIONS.remove(server);
+        CompletableFuture<TestRun> future = CompletableFuture.supplyAsync(() -> {
+            try {
+                return runFromPrepared(
+                    server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize(), prepared, 1, listener
+                );
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        }, COMPILER_EXECUTOR);
+        COMPILING_TESTS.put(server, new CompilationJob(prepared.request().label(), future, listener, prepared.runId(), prepared));
+        return true;
+    }
+
+    public static boolean cancelRevision(MinecraftServer server, String runId, String reason) {
+        CompilationJob compilation = COMPILING_TESTS.get(server);
+        if (compilation != null && runId.equals(compilation.runId())) {
+            COMPILING_TESTS.remove(server);
+            compilation.future().cancel(true);
+            if (compilation.prepared() != null) AllcraftRevisionBuilder.discard(compilation.prepared());
+            if (compilation.listener() != null) compilation.listener().failed(reason);
+            return true;
+        }
+        TestRun run = ACTIVE_TESTS.get(server);
+        if (run == null || !run.runId.equals(runId)) {
+            return false;
+        }
+        abortRun(server, run, reason);
+        return true;
+    }
+
+    /** Releases per-server scheduler state and synchronously rolls back uncommitted publication state. */
+    public static void stop(MinecraftServer server) {
+        EXTERNAL_RESERVATIONS.remove(server);
+        CompilationJob compilation = COMPILING_TESTS.remove(server);
+        if (compilation != null) {
+            compilation.future().cancel(true);
+            if (compilation.prepared() != null) AllcraftRevisionBuilder.discard(compilation.prepared());
+            if (compilation.listener() != null) compilation.listener().interrupted("server stopped before publication");
+        }
+        TestRun run = ACTIVE_TESTS.remove(server);
+        if (run != null && !run.patches.isEmpty()) {
+            Patch patch = run.current();
+            if (patch.authoritativeCommitted) {
+                try {
+                    if (patch.serverTransaction != null) patch.serverTransaction.seal();
+                    clearTransactionState(run);
+                } catch (Exception e) {
+                    LOGGER.warn("Failed to finish committed Allcraft transaction during server stop", e);
+                }
+                if (run.listener != null) run.listener.finalized(patch.revision);
+            } else {
+                String failure = "server stopped during publication";
+                try {
+                    if (patch.serverTransaction != null && patch.serverTransaction.started()) patch.serverTransaction.rollback();
+                } catch (Exception e) {
+                    LOGGER.error("Failed to roll back Allcraft runtime during server stop", e);
+                    failure += "; runtime rollback failed: " + conciseMessage(e);
+                }
+                failure = rollbackCommittedSource(run, patch, failure);
+                if (patch.preparedRevision != null) AllcraftRevisionBuilder.discard(patch.preparedRevision);
+                try {
+                    clearTransactionState(run);
+                } catch (IOException e) {
+                    LOGGER.warn("Failed to clear stopped Allcraft transaction journal", e);
+                }
+                if (run.listener != null) run.listener.interrupted(failure);
+            }
+        }
+        PENDING_RESOURCE_RESTORES.remove(server);
+        CompletableFuture<Void> restore = ACTIVE_RESOURCE_RESTORES.remove(server);
+        if (restore != null) restore.cancel(true);
+    }
+
     public static void restoreWorldArtifacts(MinecraftServer server, Path worldRoot) {
         Path patchesRoot = worldRoot.toAbsolutePath().normalize().resolve("patches");
         Path manifestPath = patchesRoot.resolve("manifest.json");
@@ -138,6 +242,7 @@ public final class AllcraftPatchServer {
         }
 
         try {
+            JsonObject manifest = readJson(manifestPath);
             Path interrupted = patchesRoot.resolve("transaction.json");
             if (Files.isRegularFile(interrupted)) {
                 JsonObject transaction = readJson(interrupted);
@@ -147,7 +252,7 @@ public final class AllcraftPatchServer {
                     transaction.has("patchId") ? transaction.get("patchId").getAsString() : "unknown",
                     phase
                 );
-                if ((phase.equals("publishing") || phase.equals("committing") || phase.equals("rolling-back"))
+                if (shouldRecoverRollback(manifest, transaction)
                     && transaction.has("serverSha256")
                     && transaction.has("revision")
                     && transaction.has("patchId")) {
@@ -163,7 +268,6 @@ public final class AllcraftPatchServer {
                 Files.deleteIfExists(interrupted);
             }
             AllcraftRuntime.resetToBase();
-            JsonObject manifest = readJson(manifestPath);
             JsonArray patches = manifest.has("patches") ? manifest.getAsJsonArray("patches") : new JsonArray();
             boolean integratedClient = classExists("net.minecraft.client.Minecraft");
             int serverArtifacts = 0;
@@ -210,6 +314,7 @@ public final class AllcraftPatchServer {
     }
 
     public static void tick(MinecraftServer server) {
+        AllcraftAiJobs.tick(server);
         CompletableFuture<Void> restoring = ACTIVE_RESOURCE_RESTORES.get(server);
         if (restoring != null) {
             if (!restoring.isDone()) {
@@ -256,6 +361,9 @@ public final class AllcraftPatchServer {
                 String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
                 announce(server, "[Allcraft] FAIL " + compilation.testName() + ": " + message, ChatFormatting.RED);
                 LOGGER.error("Failed to prepare Allcraft test {}", compilation.testName(), cause);
+                if (compilation.listener() != null) {
+                    compilation.listener().failed(message);
+                }
             }
             return;
         }
@@ -311,6 +419,7 @@ public final class AllcraftPatchServer {
                         broadcastControl(server, run, patch, AllcraftPayloads.ControlAction.ACTIVATE);
                         run.phase = Phase.WAITING_FOR_APPLIED;
                         run.phaseStartedAt = tick;
+                        if (run.listener != null) run.listener.phase("activating");
                     }
                 }
                 case WAITING_FOR_APPLIED -> {
@@ -332,27 +441,9 @@ public final class AllcraftPatchServer {
                 }
                 case WAITING_FOR_COMMITTED -> {
                     if (run.committedPlayers.containsAll(run.expectedPlayers)) {
+                        if (run.listener != null) run.listener.beforeCommit(patch.preparedRevision);
                         commitRevision(run, patch);
-                        if (patch.serverTransaction != null) {
-                            patch.serverTransaction.seal();
-                        }
-                        broadcastControl(server, run, patch, AllcraftPayloads.ControlAction.FINALIZE);
-                        clearTransactionState(run);
-                        if (patch.step >= run.totalSteps) {
-                            finishTest(server, run);
-                        } else {
-                            run.phase = Phase.BETWEEN_PATCHES;
-                            run.readyPlayers.clear();
-                            run.appliedPlayers.clear();
-                            run.committedPlayers.clear();
-                            run.nextPatchFuture = CompletableFuture.supplyAsync(() -> {
-                                try {
-                                    return prepareNextFixture(run, patch.step + 1);
-                                } catch (IOException e) {
-                                    throw new CompletionException(e);
-                                }
-                            }, COMPILER_EXECUTOR);
-                        }
+                        finalizeCommittedRevision(server, run, patch);
                     } else {
                         checkTimeout(server, run, tick, "COMMITTED");
                     }
@@ -389,8 +480,13 @@ public final class AllcraftPatchServer {
                 }
             }
         } catch (Exception e) {
-            abortRun(server, run, conciseMessage(e));
-            LOGGER.error("Allcraft patch test {} failed", run.testName, e);
+            if (run.current().authoritativeCommitted) {
+                LOGGER.error("Committed Allcraft revision {} encountered a post-commit error", run.current().revision, e);
+                finishTest(server, run);
+            } else {
+                abortRun(server, run, conciseMessage(e));
+                LOGGER.error("Allcraft patch test {} failed", run.testName, e);
+            }
         }
     }
 
@@ -505,6 +601,12 @@ public final class AllcraftPatchServer {
     }
 
     private static TestRun runFromPrepared(Path worldRoot, AllcraftRevisionBuilder.PreparedRevision prepared, int totalSteps) throws IOException {
+        return runFromPrepared(worldRoot, prepared, totalSteps, null);
+    }
+
+    private static TestRun runFromPrepared(
+        Path worldRoot, AllcraftRevisionBuilder.PreparedRevision prepared, int totalSteps, RevisionListener listener
+    ) throws IOException {
         Patch patch = patchFromPrepared(prepared);
         return new TestRun(
             prepared.request().label(),
@@ -516,7 +618,8 @@ public final class AllcraftPatchServer {
             totalSteps,
             prepared.client().cacheHit(),
             prepared.server().cacheHit(),
-            prepared.client().compilationMillis() + prepared.server().compilationMillis()
+            prepared.client().compilationMillis() + prepared.server().compilationMillis(),
+            listener
         );
     }
 
@@ -636,6 +739,7 @@ public final class AllcraftPatchServer {
 
         run.phase = Phase.WAITING_FOR_READY;
         run.phaseStartedAt = server.getTickCount();
+        if (run.listener != null) run.listener.phase("staging");
         try {
             writeTransactionState(run, patch, "staged", null);
         } catch (IOException e) {
@@ -686,7 +790,44 @@ public final class AllcraftPatchServer {
     private static void commitRevision(TestRun run, Patch patch) throws IOException {
         if (patch.preparedRevision != null) {
             AllcraftRevisionBuilder.commit(patch.preparedRevision);
+            patch.sourceSnapshotCommitted = true;
         }
+        patch.sourcePromotion = AllcraftSourceRepository.recordFinalized(
+            run.worldRoot,
+            patch.preparedRevision == null ? patch.revision - 1L : patch.preparedRevision.parentRevision(),
+            patch.revision,
+            "Allcraft finalized source revision " + patch.revision + " (" + run.testName + ")"
+        );
+        JsonObject result = new JsonObject();
+        result.addProperty("testName", run.testName);
+        result.addProperty("runId", run.runId);
+        result.addProperty("step", patch.step);
+        result.addProperty("totalSteps", run.totalSteps);
+        result.addProperty("revision", patch.revision);
+        result.addProperty("patchId", patch.patchId);
+        result.addProperty("clientSha256", patch.clientSha256);
+        result.addProperty("serverSha256", patch.serverSha256);
+        result.addProperty("activationTick", patch.activationTick);
+        result.addProperty("serverRuntime", patch.serverApplyResult == null ? "not applied" : patch.serverApplyResult.summary());
+        result.addProperty("serverResources", patch.serverResourceResult == null ? "not applied" : patch.serverResourceResult.summary());
+        result.addProperty("compilationMillis", run.compilationMillis);
+        result.addProperty("clientCompilerCacheHit", run.clientCacheHit);
+        result.addProperty("serverCompilerCacheHit", run.serverCacheHit);
+        result.addProperty("serverAppliedAt", Instant.now().toString());
+        try {
+            Path results = run.patchesRoot.resolve("test-results");
+            Files.createDirectories(results);
+            Files.writeString(
+                results.resolve(run.testName + ".jsonl"),
+                COMPACT_GSON.toJson(result) + System.lineSeparator(),
+                StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.APPEND
+            );
+        } catch (IOException e) {
+            LOGGER.warn("Failed to write optional Allcraft result log for {}", run.testName, e);
+        }
+
         Path manifestPath = run.patchesRoot.resolve("manifest.json");
         JsonObject manifest = readJson(manifestPath);
         manifest.addProperty("currentRevision", patch.revision);
@@ -706,32 +847,40 @@ public final class AllcraftPatchServer {
         patches.add(entry);
         manifest.add("patches", patches);
         writeJsonAtomically(manifestPath, manifest);
+        patch.authoritativeCommitted = true;
+    }
 
-        JsonObject result = new JsonObject();
-        result.addProperty("testName", run.testName);
-        result.addProperty("runId", run.runId);
-        result.addProperty("step", patch.step);
-        result.addProperty("totalSteps", run.totalSteps);
-        result.addProperty("revision", patch.revision);
-        result.addProperty("patchId", patch.patchId);
-        result.addProperty("clientSha256", patch.clientSha256);
-        result.addProperty("serverSha256", patch.serverSha256);
-        result.addProperty("activationTick", patch.activationTick);
-        result.addProperty("serverRuntime", patch.serverApplyResult == null ? "not applied" : patch.serverApplyResult.summary());
-        result.addProperty("serverResources", patch.serverResourceResult == null ? "not applied" : patch.serverResourceResult.summary());
-        result.addProperty("compilationMillis", run.compilationMillis);
-        result.addProperty("clientCompilerCacheHit", run.clientCacheHit);
-        result.addProperty("serverCompilerCacheHit", run.serverCacheHit);
-        result.addProperty("serverAppliedAt", Instant.now().toString());
-        Path results = run.patchesRoot.resolve("test-results");
-        Files.createDirectories(results);
-        Files.writeString(
-            results.resolve(run.testName + ".jsonl"),
-            COMPACT_GSON.toJson(result) + System.lineSeparator(),
-            StandardCharsets.UTF_8,
-            StandardOpenOption.CREATE,
-            StandardOpenOption.APPEND
-        );
+    private static void finalizeCommittedRevision(MinecraftServer server, TestRun run, Patch patch) {
+        try {
+            if (patch.serverTransaction != null) patch.serverTransaction.seal();
+        } catch (Throwable e) {
+            LOGGER.error("Committed Allcraft revision {} could not be sealed in memory", patch.revision, e);
+        }
+        try {
+            broadcastControl(server, run, patch, AllcraftPayloads.ControlAction.FINALIZE);
+        } catch (Throwable e) {
+            LOGGER.warn("Committed Allcraft revision {} could not notify every client of FINALIZE", patch.revision, e);
+        }
+        try {
+            clearTransactionState(run);
+        } catch (IOException e) {
+            LOGGER.warn("Committed Allcraft revision {} left a recoverable transaction journal", patch.revision, e);
+        }
+        if (patch.step >= run.totalSteps) {
+            finishTest(server, run);
+            return;
+        }
+        run.phase = Phase.BETWEEN_PATCHES;
+        run.readyPlayers.clear();
+        run.appliedPlayers.clear();
+        run.committedPlayers.clear();
+        run.nextPatchFuture = CompletableFuture.supplyAsync(() -> {
+            try {
+                return prepareNextFixture(run, patch.step + 1);
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        }, COMPILER_EXECUTOR);
     }
 
     private static void checkTimeout(MinecraftServer server, TestRun run, long tick, String status) {
@@ -746,15 +895,26 @@ public final class AllcraftPatchServer {
 
     private static void finishTest(MinecraftServer server, TestRun run) {
         ACTIVE_TESTS.remove(server);
-        announce(
-            server,
-            "[Allcraft] PASS "
-                + run.testName
-                + ": all "
-                + run.totalSteps
-                + " patch(es) were compiled, cached, scheduled, activated, and acknowledged by every client",
-            ChatFormatting.GREEN
-        );
+        try {
+            announce(
+                server,
+                "[Allcraft] PASS "
+                    + run.testName
+                    + ": all "
+                    + run.totalSteps
+                    + " patch(es) were compiled, cached, scheduled, activated, and acknowledged by every client",
+                ChatFormatting.GREEN
+            );
+        } catch (Throwable e) {
+            LOGGER.warn("Could not announce finalized Allcraft revision {}", run.current().revision, e);
+        }
+        if (run.listener != null) {
+            try {
+                run.listener.finalized(run.current().revision);
+            } catch (Throwable e) {
+                LOGGER.error("Allcraft revision listener failed after finalized revision {}", run.current().revision, e);
+            }
+        }
     }
 
     private static void abortRun(MinecraftServer server, TestRun run, String reason) {
@@ -790,6 +950,7 @@ public final class AllcraftPatchServer {
     private static void failTest(MinecraftServer server, TestRun run, String reason) {
         if (ACTIVE_TESTS.remove(server) != null) {
             Patch patch = run.current();
+            reason = rollbackCommittedSource(run, patch, reason);
             if (patch.preparedRevision != null) {
                 AllcraftRevisionBuilder.discard(patch.preparedRevision);
             }
@@ -799,7 +960,29 @@ public final class AllcraftPatchServer {
                 LOGGER.warn("Failed to clear transaction journal", e);
             }
             announce(server, "[Allcraft] FAIL " + run.testName + ": " + reason, ChatFormatting.RED);
+            if (run.listener != null) run.listener.failed(reason);
         }
+    }
+
+    private static String rollbackCommittedSource(TestRun run, Patch patch, String reason) {
+        if (patch.authoritativeCommitted) return reason;
+        if (patch.sourcePromotion != null) {
+            try {
+                AllcraftSourceRepository.rollback(run.worldRoot, patch.sourcePromotion);
+            } catch (IOException e) {
+                LOGGER.error("Failed to restore canonical source after revision failure", e);
+                reason += "; source rollback failed: " + conciseMessage(e);
+            }
+        }
+        if (patch.sourceSnapshotCommitted && patch.preparedRevision != null) {
+            try {
+                AllcraftRevisionBuilder.rollbackCommit(patch.preparedRevision);
+            } catch (IOException e) {
+                LOGGER.error("Failed to restore source snapshot after revision failure", e);
+                reason += "; source snapshot rollback failed: " + conciseMessage(e);
+            }
+        }
+        return reason;
     }
 
     private static void writeTransactionState(TestRun run, Patch patch, String phase, String failure) throws IOException {
@@ -835,6 +1018,29 @@ public final class AllcraftPatchServer {
         } catch (RuntimeException e) {
             throw new IOException("Invalid Allcraft JSON file " + path, e);
         }
+    }
+
+    private static boolean manifestContains(JsonObject manifest, long revision, String patchId) {
+        if (!manifest.has("patches")) return false;
+        for (var value : manifest.getAsJsonArray("patches")) {
+            JsonObject patch = value.getAsJsonObject();
+            if (patch.has("revision")
+                && patch.has("patchId")
+                && patch.get("revision").getAsLong() == revision
+                && patch.get("patchId").getAsString().equals(patchId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean shouldRecoverRollback(JsonObject manifest, JsonObject transaction) {
+        String phase = transaction.has("phase") ? transaction.get("phase").getAsString() : "unknown";
+        boolean rollbackPhase = phase.equals("publishing") || phase.equals("committing") || phase.equals("rolling-back");
+        if (!rollbackPhase || !transaction.has("revision") || !transaction.has("patchId")) return false;
+        return !manifestContains(
+            manifest, transaction.get("revision").getAsLong(), transaction.get("patchId").getAsString()
+        );
     }
 
     private static String requireUuid(JsonObject object, String property, Path path) throws IOException {
@@ -945,7 +1151,16 @@ public final class AllcraftPatchServer {
     private record StepSpec(String display, String message, int fillerBytes, int activationDelayTicks) {
     }
 
-    private record CompilationJob(String testName, CompletableFuture<TestRun> future) {
+    private record CompilationJob(
+        String testName,
+        CompletableFuture<TestRun> future,
+        RevisionListener listener,
+        String runId,
+        AllcraftRevisionBuilder.PreparedRevision prepared
+    ) {
+        private CompilationJob(String testName, CompletableFuture<TestRun> future) {
+            this(testName, future, null, null, null);
+        }
     }
 
     private static final class Patch {
@@ -977,6 +1192,9 @@ public final class AllcraftPatchServer {
         private long compilationMillis;
         private String registryPlan = "[]";
         private String registryDigest = "";
+        private AllcraftSourceRepository.Promotion sourcePromotion;
+        private boolean sourceSnapshotCommitted;
+        private boolean authoritativeCommitted;
 
         private Patch(
             String patchId,
@@ -1035,6 +1253,7 @@ public final class AllcraftPatchServer {
         private long phaseStartedAt;
         private CompletableFuture<Patch> nextPatchFuture;
         private String failureReason;
+        private final RevisionListener listener;
 
         private TestRun(
             String testName,
@@ -1046,7 +1265,8 @@ public final class AllcraftPatchServer {
             int totalSteps,
             boolean clientCacheHit,
             boolean serverCacheHit,
-            long compilationMillis
+            long compilationMillis,
+            RevisionListener listener
         ) {
             this.testName = testName;
             this.runId = runId;
@@ -1059,6 +1279,7 @@ public final class AllcraftPatchServer {
             this.clientCacheHit = clientCacheHit;
             this.serverCacheHit = serverCacheHit;
             this.compilationMillis = compilationMillis;
+            this.listener = listener;
         }
 
         private Patch current() {
@@ -1067,5 +1288,21 @@ public final class AllcraftPatchServer {
     }
 
     private record ResourceRestore(List<Path> serverArtifacts, List<Path> clientArtifacts) {
+    }
+
+    public interface RevisionListener {
+        default void phase(String phase) {
+        }
+
+        default void beforeCommit(AllcraftRevisionBuilder.PreparedRevision prepared) throws IOException {
+        }
+
+        void finalized(long revision);
+
+        void failed(String reason);
+
+        default void interrupted(String reason) {
+            failed(reason);
+        }
     }
 }

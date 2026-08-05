@@ -39,6 +39,38 @@ public final class CodeGeneralityRegression {
         Path firstWorld = world(work.resolve("world-a"));
         AllcraftRevisionBuilder.initializeBaseline(firstWorld);
 
+        // AI integration builds from a private checkout without mutating authoritative source.
+        Path privateSource = work.resolve("private-candidate-source");
+        copyTree(firstWorld.resolve("source"), privateSource);
+        Path privateClass = privateSource.resolve("client/allcraft/generality/PrivateCandidate.java");
+        Files.createDirectories(privateClass.getParent());
+        Files.writeString(
+            privateClass,
+            "package allcraft.generality; public final class PrivateCandidate { public static int value() { return 7; } }\n",
+            StandardCharsets.UTF_8
+        );
+        AllcraftRevisionBuilder.PreparedRevision privateBuild = AllcraftRevisionBuilder.prepare(
+            firstWorld, privateSource, AllcraftRevisionBuilder.Request.production("private-candidate")
+        );
+        require(
+            privateBuild.client().addedClasses().contains("allcraft.generality.PrivateCandidate"),
+            "private source checkout was not compiled"
+        );
+        require(
+            !Files.exists(firstWorld.resolve("source/client/allcraft/generality/PrivateCandidate.java")),
+            "private build mutated canonical source"
+        );
+        AllcraftRevisionBuilder.commit(privateBuild);
+        AllcraftRevisionBuilder.rollbackCommit(privateBuild);
+        require(
+            JsonParser.parseString(Files.readString(firstWorld.resolve("patches/revisions/current-source.json")))
+                    .getAsJsonObject()
+                    .get("revision")
+                    .getAsLong()
+                == 0L,
+            "aborted pre-manifest source snapshot did not restore its parent"
+        );
+
         writeVersionOne(firstWorld.resolve("source"), "a");
         AllcraftRevisionBuilder.PreparedRevision revisionOne = AllcraftRevisionBuilder.prepare(
             firstWorld, AllcraftRevisionBuilder.Request.production("generic-v1")
@@ -183,6 +215,21 @@ public final class CodeGeneralityRegression {
     }
 
     private static void testSharedContractGuards(Path work) throws Exception {
+        Path missingLifecycle = world(work.resolve("missing-lifecycle"));
+        AllcraftRevisionBuilder.initializeBaseline(missingLifecycle);
+        Files.writeString(
+            missingLifecycle.resolve("source/allcraft-revision.json"),
+            "{\"client\":{\"migrate\":[\"allcraft.missing.NeverCommitted\"]}}\n",
+            StandardCharsets.UTF_8
+        );
+        boolean missingRejected = false;
+        try {
+            AllcraftRevisionBuilder.prepare(missingLifecycle, AllcraftRevisionBuilder.Request.production("missing-lifecycle"));
+        } catch (Exception expected) {
+            missingRejected = expected.getMessage() != null && expected.getMessage().contains("unavailable class");
+        }
+        require(missingRejected, "missing lifecycle class was allowed to depend on aborted JVM residue");
+
         Path divergent = world(work.resolve("contract-divergent"));
         AllcraftRevisionBuilder.initializeBaseline(divergent);
         Path divergentClient = divergent.resolve("source/client/allcraft/contract/DivergentClient.java");
@@ -269,6 +316,19 @@ public final class CodeGeneralityRegression {
         manifest.add("patches", new JsonArray());
         writeJson(root.resolve("patches/manifest.json"), manifest);
         return root;
+    }
+
+    private static void copyTree(Path source, Path destination) throws Exception {
+        try (var paths = Files.walk(source)) {
+            for (Path path : paths.toList()) {
+                Path target = destination.resolve(source.relativize(path));
+                if (Files.isDirectory(path)) Files.createDirectories(target);
+                else {
+                    Files.createDirectories(target.getParent());
+                    Files.copy(path, target);
+                }
+            }
+        }
     }
 
     private static void writeVersionOne(Path source, String world) throws Exception {

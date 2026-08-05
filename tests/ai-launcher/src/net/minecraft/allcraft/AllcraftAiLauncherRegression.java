@@ -1,5 +1,7 @@
 package net.minecraft.allcraft;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import com.mojang.brigadier.StringReader;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import java.io.IOException;
@@ -16,9 +18,11 @@ public final class AllcraftAiLauncherRegression {
     public static void main(String[] args) throws Exception {
         testCommandShape();
         testExactRequestAndConversationId();
+        testContinuationAndInfo();
         testFailureAndTimeout();
         testValidation();
         testGreedyRequestParsing();
+        testCommittedJournalRecoveryDecision();
         System.out.println("Allcraft AI launcher regression passed");
     }
 
@@ -58,6 +62,17 @@ public final class AllcraftAiLauncherRegression {
             List<String> arguments = Files.readAllLines(argsCapture);
             require(arguments.getFirst().equals("send"), "fake CLI received send");
             require(arguments.contains(module.toString()), "fake CLI received exact module path");
+
+            Path durableId = root.resolve("conversation-id.pending");
+            AllcraftAiLauncher.CliResult durable = AllcraftAiLauncher.runCli(
+                executable, root, module, request, "1785000000000-abc123", durableId, Duration.ofSeconds(5L)
+            );
+            require(durable.conversationId().equals("1785000000000-abc123"), "durable launch returns conversation ID");
+            require(Files.readString(durableId).trim().equals(durable.conversationId()), "CLI output durably captures conversation ID");
+            require(
+                Files.readAllLines(argsCapture).containsAll(List.of("--new-conversation-id", "1785000000000-abc123")),
+                "durable launch reserves the persisted conversation ID"
+            );
         } finally {
             deleteTree(root);
         }
@@ -90,6 +105,31 @@ public final class AllcraftAiLauncherRegression {
         }
     }
 
+    private static void testContinuationAndInfo() throws Exception {
+        Path root = Files.createTempDirectory("allcraft-ai-followup-");
+        try {
+            Path stdinCapture = root.resolve("followup.txt");
+            Path executable = script(
+                root,
+                "exo-followup",
+                "#!/bin/sh\n"
+                    + "if [ \"$1\" = info ]; then printf '%s\\n' '{\"streaming\":false,\"messageCount\":4,\"title\":\"Ruby block\"}'; exit 0; fi\n"
+                    + "cat > " + quote(stdinCapture) + "\nprintf '%s\\n' '1785000000000-abc123'\n"
+            );
+            AllcraftAiLauncher.CliResult continued = AllcraftAiLauncher.continueCli(
+                executable, root, "1785000000000-abc123", "repair exactly", Duration.ofSeconds(5L)
+            );
+            require(continued.conversationId().equals("1785000000000-abc123"), "follow-up conversation retained");
+            require(Files.readString(stdinCapture).equals("repair exactly"), "follow-up diagnostics preserved");
+            AllcraftAiLauncher.CliInfo info = AllcraftAiLauncher.info(
+                executable, root, "1785000000000-abc123", Duration.ofSeconds(5L)
+            );
+            require(!info.streaming() && info.messageCount() == 4 && info.title().equals("Ruby block"), "conversation info parsed");
+        } finally {
+            deleteTree(root);
+        }
+    }
+
     private static void testValidation() throws Exception {
         Path root = Files.createTempDirectory("allcraft-ai-validation-");
         try {
@@ -110,6 +150,25 @@ public final class AllcraftAiLauncherRegression {
         String request = "make a ruby block with spaces and symbols !?";
         String parsed = StringArgumentType.greedyString().parse(new StringReader(request));
         require(parsed.equals(request), "greedy command request is preserved");
+    }
+
+    private static void testCommittedJournalRecoveryDecision() {
+        JsonObject transaction = new JsonObject();
+        transaction.addProperty("phase", "committing");
+        transaction.addProperty("revision", 7L);
+        transaction.addProperty("patchId", "patch-seven");
+        JsonObject manifest = new JsonObject();
+        manifest.add("patches", new JsonArray());
+        require(AllcraftPatchServer.shouldRecoverRollback(manifest, transaction), "uncommitted journal requires rollback recovery");
+
+        JsonObject committed = new JsonObject();
+        committed.addProperty("revision", 7L);
+        committed.addProperty("patchId", "patch-seven");
+        manifest.getAsJsonArray("patches").add(committed);
+        require(
+            !AllcraftPatchServer.shouldRecoverRollback(manifest, transaction),
+            "manifest-selected revision must not run rollback hooks during recovery"
+        );
     }
 
     private static Path script(Path root, String name, String contents) throws IOException {

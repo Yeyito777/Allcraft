@@ -113,9 +113,17 @@ public final class AllcraftRevisionBuilder {
     }
 
     public static PreparedRevision prepare(Path worldRoot, Request request) throws IOException {
+        return prepare(worldRoot, worldRoot.toAbsolutePath().normalize().resolve("source"), request);
+    }
+
+    /** Builds against a private source checkout while retaining the world's committed revision and artifact storage. */
+    public static PreparedRevision prepare(Path worldRoot, Path candidateSourceRoot, Request request) throws IOException {
         long startedAt = System.nanoTime();
         Path normalized = worldRoot.toAbsolutePath().normalize();
-        Path sourceRoot = normalized.resolve("source");
+        Path sourceRoot = candidateSourceRoot.toAbsolutePath().normalize();
+        if (!Files.isDirectory(sourceRoot)) {
+            throw new IOException("Candidate world source is missing: " + sourceRoot);
+        }
         Path patchesRoot = normalized.resolve("patches");
         initializeBaseline(normalized);
         JsonObject worldManifest = readJson(patchesRoot.resolve("manifest.json"));
@@ -141,6 +149,7 @@ public final class AllcraftRevisionBuilder {
         SideBuild client = buildSide(Side.CLIENT, sourceRoot, patchesRoot, worldManifest, previous, scanned, diff);
         SideBuild server = buildSide(Side.SERVER, sourceRoot, patchesRoot, worldManifest, previous, scanned, diff);
         SourceSnapshot next = withCompiledClasses(scanned, previous, client, server);
+        validateLifecycleAvailability(next, client, server, request);
         SharedContract sharedContract = validateSharedContract(next, client, server, patchesRoot, worldManifest);
         Path stagedSnapshot = patchesRoot.resolve("transactions").resolve(patchId + "-source.json");
         writeSnapshot(stagedSnapshot, next);
@@ -230,6 +239,18 @@ public final class AllcraftRevisionBuilder {
         byte[] bytes = Files.readAllBytes(prepared.stagedSnapshot);
         writeAtomically(committedSnapshot(patchesRoot, prepared.revision), bytes);
         writeAtomically(destination, bytes);
+        Files.deleteIfExists(prepared.stagedSnapshot);
+    }
+
+    /** Restores the parent snapshot when publication aborts after source-snapshot commit but before manifest commit. */
+    public static synchronized void rollbackCommit(PreparedRevision prepared) throws IOException {
+        Path patchesRoot = prepared.serverArtifactPath.getParent().getParent().getParent();
+        Path parent = committedSnapshot(patchesRoot, prepared.parentRevision);
+        if (!Files.isRegularFile(parent)) {
+            throw new IOException("Missing parent source snapshot for revision " + prepared.parentRevision);
+        }
+        writeAtomically(patchesRoot.resolve(SNAPSHOT), Files.readAllBytes(parent));
+        Files.deleteIfExists(committedSnapshot(patchesRoot, prepared.revision));
         Files.deleteIfExists(prepared.stagedSnapshot);
     }
 
@@ -930,12 +951,25 @@ public final class AllcraftRevisionBuilder {
         if (!Files.isDirectory(sourceRoot)) {
             throw new IOException("World source is missing: " + sourceRoot);
         }
-        try (Stream<Path> stream = Files.walk(sourceRoot)) {
-            for (Path file : stream.filter(Files::isRegularFile).sorted().toList()) {
+        List<Path> sourceFiles = new ArrayList<>();
+        Files.walkFileTree(sourceRoot, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes) {
+                if (directory.equals(sourceRoot)) return FileVisitResult.CONTINUE;
+                String relative = unix(sourceRoot.relativize(directory));
+                return ignoredSourcePath(relative) ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
                 String relative = unix(sourceRoot.relativize(file));
-                if (relative.startsWith(".git/") || relative.startsWith(".allcraft/") || relative.contains("/build/") || relative.endsWith("~")) {
-                    continue;
-                }
+                if (attributes.isRegularFile() && !ignoredSourcePath(relative)) sourceFiles.add(file);
+                return FileVisitResult.CONTINUE;
+            }
+        });
+        sourceFiles.sort(Comparator.naturalOrder());
+        for (Path file : sourceFiles) {
+                String relative = unix(sourceRoot.relativize(file));
                 SideScope scope = classifyScope(relative);
                 String kind = relative.endsWith(".java") ? "java" : isResource(relative) ? "resource" : "control";
                 List<String> classNames = List.of();
@@ -949,9 +983,21 @@ public final class AllcraftRevisionBuilder {
                     }
                 }
                 files.put(relative, new FileState(sha256(file), Files.size(file), scope.id, kind, classNames));
-            }
         }
         return new SourceSnapshot(revision, Map.copyOf(files));
+    }
+
+    private static boolean ignoredSourcePath(String relative) {
+        return relative.equals(".git")
+            || relative.equals(".gitignore")
+            || relative.equals(".worktrees")
+            || relative.equals(".allcraft")
+            || relative.equals("build")
+            || relative.startsWith(".git/")
+            || relative.startsWith(".worktrees/")
+            || relative.startsWith(".allcraft/")
+            || relative.contains("/build/")
+            || relative.endsWith("~");
     }
 
     private static Diff diff(SourceSnapshot previous, SourceSnapshot current) {
@@ -1150,6 +1196,37 @@ public final class AllcraftRevisionBuilder {
         JsonObject root = readJson(config);
         JsonObject selected = root.has(side.id) ? root.getAsJsonObject(side.id) : new JsonObject();
         return new Hooks(hook(selected, "prepare"), hook(selected, "migrate"), hook(selected, "commit"), hook(selected, "rollback"));
+    }
+
+    private static void validateLifecycleAvailability(
+        SourceSnapshot snapshot, SideBuild client, SideBuild server, Request request
+    ) throws IOException {
+        validateLifecycleAvailability(snapshot, Side.CLIENT, client.hooks, request.clientEntrypoints);
+        validateLifecycleAvailability(snapshot, Side.SERVER, server.hooks, request.serverEntrypoints);
+    }
+
+    private static void validateLifecycleAvailability(
+        SourceSnapshot snapshot, Side side, Hooks hooks, List<String> entrypoints
+    ) throws IOException {
+        Set<String> available = new HashSet<>();
+        for (FileState file : snapshot.files.values()) {
+            if (file.kind.equals("java") && file.appliesTo(side)) available.addAll(file.classNames);
+        }
+        Set<String> declared = new LinkedHashSet<>();
+        declared.addAll(hooks.prepare);
+        declared.addAll(hooks.migrate);
+        declared.addAll(hooks.commit);
+        declared.addAll(hooks.rollback);
+        declared.addAll(entrypoints);
+        Set<String> base = new HashSet<>(baseClassEntries());
+        for (String className : declared) {
+            if (!available.contains(className) && !base.contains(className.replace('.', '/') + ".class")) {
+                throw new IOException(
+                    "Allcraft " + side.id + " lifecycle declares unavailable class " + className
+                        + "; keep its source in the selected revision or remove the declaration"
+                );
+            }
+        }
     }
 
     private static List<String> hook(JsonObject object, String name) {
@@ -1445,6 +1522,10 @@ public final class AllcraftRevisionBuilder {
 
         public static Request production(String label) {
             return new Request(label, "chat", "Arbitrary world source revision", 0, 1, 1, false, null, List.of(), List.of());
+        }
+
+        public static Request production(String label, String runId) {
+            return new Request(label, "chat", "AI-generated world source revision", 0, 1, 1, false, runId, List.of(), List.of());
         }
 
         public static Request test(

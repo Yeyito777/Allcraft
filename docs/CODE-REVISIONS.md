@@ -10,6 +10,8 @@ Edit the authoritative source under `saves/<world>/source/`, then run:
 
 The command runs the same pipeline used by code/resource test fixtures. Clients only receive compiled artifacts and never run `javac`.
 
+Alternatively, `/allcraft ai <request>` performs edits in a private Git worktree, builds against that checkout, and promotes it only through the normal transactional revision lifecycle. See [AI-COMMAND.md](AI-COMMAND.md).
+
 ## Source layout
 
 ```text
@@ -69,6 +71,8 @@ public static void allcraftRollback(AllcraftRuntime.MigrationContext context) th
 
 No-argument forms are also accepted. Hook sources are automatically included in every artifact that references them, even when their source text did not change.
 
+Every declared hook/entrypoint class must exist in the selected source revision or the installed base. The builder and runtime both enforce this, so a class left resident in the JVM by an aborted transaction cannot become an undeclared dependency of a later revision or break fresh-process replay.
+
 `MigrationContext` exposes the world, side, parent/target revisions, patch ID, artifact path, in-memory checkpoints, and crash-safe string checkpoints. Durable checkpoints are stored beside the immutable artifact and are available to restart recovery.
 
 ## Transaction order
@@ -98,6 +102,7 @@ Any failure before finalization sends `ABORT`. Modified definitions are restored
 ```bash
 tests/code-generality/run.sh
 tests/jvm/run.sh jvm/linux-x64
+tests/ai-worktrees/run.sh
 ```
 
 The generality suite covers arbitrary client/server inputs, shared-contract divergence/tampering, dependency closure, content-addressed cache hits, resource movement, structural class evolution, live/static migration, compile and migration failures, rollback, live-object-safe retirement, world switching, reconnect replay, and JFR-enabled execution. The JVM suite covers methods, fields, constructors, interfaces, active frames, C2, attach, and JFR behavior.
