@@ -933,7 +933,7 @@ public final class AllcraftRevisionBuilder {
         try (Stream<Path> stream = Files.walk(sourceRoot)) {
             for (Path file : stream.filter(Files::isRegularFile).sorted().toList()) {
                 String relative = unix(sourceRoot.relativize(file));
-                if (relative.startsWith(".git/") || relative.contains("/build/") || relative.endsWith("~")) {
+                if (relative.startsWith(".git/") || relative.startsWith(".allcraft/") || relative.contains("/build/") || relative.endsWith("~")) {
                     continue;
                 }
                 SideScope scope = classifyScope(relative);

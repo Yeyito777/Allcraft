@@ -2,6 +2,7 @@ package net.minecraft.server.commands;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import net.minecraft.allcraft.AllcraftAiLauncher;
 import net.minecraft.allcraft.AllcraftPatchServer;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -26,6 +27,18 @@ public final class AllcraftCommand {
                                 .executes(
                                     context -> AllcraftPatchServer.startTest(
                                         context.getSource(), StringArgumentType.getString(context, "test-name")
+                                    )
+                                )
+                        )
+                )
+                .then(
+                    Commands.literal("ai")
+                        .executes(context -> AllcraftAiLauncher.start(context.getSource(), ""))
+                        .then(
+                            Commands.argument("request", StringArgumentType.greedyString())
+                                .executes(
+                                    context -> AllcraftAiLauncher.start(
+                                        context.getSource(), StringArgumentType.getString(context, "request")
                                     )
                                 )
                         )

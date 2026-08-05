@@ -10,6 +10,8 @@ Allcraft works like a Roblox-style engine and place:
 - Clients receive compiled world overlays and assets; they never compile server patches.
 - Single-player uses the same design through Minecraft's integrated server.
 
+The current `/allcraft ai <request>` command and its conversation-scoped semantic tools are documented in [AI-COMMAND.md](AI-COMMAND.md). The command-to-conversation bridge is implemented; parallel worktree integration remains a later phase.
+
 ## Roles
 
 ### Server

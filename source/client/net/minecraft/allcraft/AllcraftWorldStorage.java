@@ -18,6 +18,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.storage.LevelStorageSource;
@@ -38,7 +39,9 @@ public final class AllcraftWorldStorage {
             Path sourceRoot = configuredPath("allcraft.sourceRoot");
             Path gameRoot = configuredGameRoot(worldRoot);
             String serverId = loadOrCreateServerId(gameRoot);
-            cloneSourceIfMissing(sourceRoot, worldRoot.resolve("source"));
+            Path worldSource = worldRoot.resolve("source");
+            cloneSourceIfMissing(sourceRoot, worldSource);
+            refreshExocortexTools(sourceRoot, worldSource);
             initializePatchStorage(worldRoot.resolve("patches"), serverId);
             AllcraftRevisionBuilder.initializeBaseline(worldRoot);
         } catch (IOException e) {
@@ -115,6 +118,20 @@ public final class AllcraftWorldStorage {
         }
 
         LOGGER.info("Finished cloning Allcraft source to {}", worldSource);
+    }
+
+    private static void refreshExocortexTools(Path sourceRoot, Path worldSource) throws IOException {
+        for (String fileName : List.of("minecraft-tools.ts", "minecraft-tools-impl.ts")) {
+            Path relative = Path.of(".allcraft/exocortex").resolve(fileName);
+            Path installed = sourceRoot.resolve(relative);
+            if (!Files.isRegularFile(installed)) {
+                throw new IOException("Installed Allcraft Minecraft tool module is missing: " + installed);
+            }
+
+            Path destination = worldSource.resolve(relative);
+            Files.createDirectories(destination.getParent());
+            Files.copy(installed, destination, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+        }
     }
 
     private static void initializePatchStorage(Path patchesRoot, String serverId) throws IOException {
