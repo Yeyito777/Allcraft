@@ -18,7 +18,6 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
-import java.util.List;
 import java.util.UUID;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.storage.LevelStorageSource;
@@ -121,17 +120,16 @@ public final class AllcraftWorldStorage {
     }
 
     private static void refreshExocortexTools(Path sourceRoot, Path worldSource) throws IOException {
-        for (String fileName : List.of("minecraft-tools.ts", "minecraft-tools-impl.ts")) {
-            Path relative = Path.of(".allcraft/exocortex").resolve(fileName);
-            Path installed = sourceRoot.resolve(relative);
-            if (!Files.isRegularFile(installed)) {
-                throw new IOException("Installed Allcraft Minecraft tool module is missing: " + installed);
-            }
-
-            Path destination = worldSource.resolve(relative);
-            Files.createDirectories(destination.getParent());
-            Files.copy(installed, destination, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+        Path relative = Path.of(".allcraft/exocortex/minecraft-tools.ts");
+        Path installed = sourceRoot.resolve(relative);
+        if (!Files.isRegularFile(installed)) {
+            throw new IOException("Installed Allcraft Minecraft tool module is missing: " + installed);
         }
+
+        Path destination = worldSource.resolve(relative);
+        Files.createDirectories(destination.getParent());
+        Files.copy(installed, destination, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+        Files.deleteIfExists(worldSource.resolve(".allcraft/exocortex/minecraft-tools-impl.ts"));
     }
 
     private static void initializePatchStorage(Path patchesRoot, String serverId) throws IOException {

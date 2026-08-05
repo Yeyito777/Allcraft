@@ -22,15 +22,14 @@ The request is written directly to the process's UTF-8 stdin. `ProcessBuilder` i
 
 ## Conversation tools
 
-Every world receives these infrastructure files in its authoritative source:
+Every world receives this infrastructure module in its authoritative source:
 
 ```text
 saves/<world>/source/.allcraft/exocortex/
-├── minecraft-tools.ts
-└── minecraft-tools-impl.ts
+└── minecraft-tools.ts
 ```
 
-`minecraft-tools.ts` is the small conversation-scoped entry module. It pins and verifies the implementation SHA-256 before loading it. `minecraft-tools-impl.ts` owns the per-conversation semantic index and exports:
+Exocortex compiles, hashes, and loads the complete module from its conversation workspace. The module owns the per-conversation semantic index and exports:
 
 - `minecraft_glob` — lists blocks, items, entities, block entities, particles, sounds, textures, models, blockstates, recipes, tags, registries, shaders, fonts, and other content by resource ID.
 - `minecraft_grep` — searches exact source/resource locations and follows relationships such as block → blockstate → model → texture, particle → definition → texture, and sound event → `sounds.json` → OGG.

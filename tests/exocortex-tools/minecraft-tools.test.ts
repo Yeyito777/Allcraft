@@ -2,8 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import toolset from "../../source/.allcraft/exocortex/minecraft-tools-impl";
-import toolsetEntry from "../../source/.allcraft/exocortex/minecraft-tools";
+import toolset from "../../source/.allcraft/exocortex/minecraft-tools";
 
 const roots: string[] = [];
 
@@ -54,17 +53,6 @@ async function fixture(name: string) {
 }
 
 describe("Allcraft Minecraft custom tools", () => {
-  test("the compact pinned entry loads the complete implementation", async () => {
-    const tools = await fixture("entry");
-    const loaded = await toolsetEntry.create({
-      conversationId: "entry",
-      modulePath: resolve(tools.moduleDirectory, "minecraft-tools.ts"),
-      moduleDirectory: resolve(import.meta.dir, "../../source/.allcraft/exocortex"),
-      workingDirectory: tools.root,
-    });
-    expect(loaded.tools.map((tool: any) => tool.name)).toEqual(["minecraft_glob", "minecraft_grep"]);
-  });
-
   test("exports two conversation-scoped read-only tools", async () => {
     const first = await fixture("first");
     const second = await fixture("second");
