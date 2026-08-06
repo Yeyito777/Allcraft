@@ -361,6 +361,7 @@ public final class AllcraftRevisionBuilder {
                 if (oldBytes == null) {
                     throw new IOException("Cannot stage " + className + ": parent-revision class bytes are unavailable");
                 }
+                entry.setValue(preserveLiveMemberIdentities(className, oldBytes, entry.getValue()));
                 previousDefinitions.put(entry.getKey(), oldBytes);
             }
         }
@@ -1210,6 +1211,55 @@ public final class AllcraftRevisionBuilder {
             return transformed;
         } catch (IllegalArgumentException e) {
             throw new IOException("Cannot generate tombstone for " + className, e);
+        }
+    }
+
+    /**
+     * Existing lambdas, method handles, active callbacks, and live objects can retain symbolic
+     * references to members that disappeared from newly compiled source. Keep those old binary
+     * identities executable in the runtime definition while leaving them absent from source, so
+     * new code cannot acquire them and delayed callbacks cannot fail with NoSuchMethodError or
+     * NoSuchFieldError. Class retirement follows the same process-lifetime safety rule.
+     */
+    private static byte[] preserveLiveMemberIdentities(String className, byte[] previous, byte[] desired) throws IOException {
+        try {
+            ClassFile classFile = ClassFile.of();
+            ClassModel oldModel = classFile.parse(previous);
+            ClassModel newModel = classFile.parse(desired);
+            Set<String> newFields = newModel.fields().stream()
+                .map(field -> field.fieldName().stringValue() + "\u0000" + field.fieldType().stringValue())
+                .collect(java.util.stream.Collectors.toSet());
+            Set<String> newMethods = newModel.methods().stream()
+                .map(method -> method.methodName().stringValue() + "\u0000" + method.methodType().stringValue())
+                .collect(java.util.stream.Collectors.toSet());
+            List<java.lang.classfile.FieldModel> retainedFields = oldModel.fields().stream()
+                .filter(field -> !newFields.contains(field.fieldName().stringValue() + "\u0000" + field.fieldType().stringValue()))
+                .toList();
+            List<java.lang.classfile.MethodModel> retainedMethods = oldModel.methods().stream()
+                .filter(method -> !method.methodName().equalsString("<clinit>"))
+                .filter(method -> !newMethods.contains(method.methodName().stringValue() + "\u0000" + method.methodType().stringValue()))
+                .toList();
+            if (retainedFields.isEmpty() && retainedMethods.isEmpty()) {
+                return desired;
+            }
+            byte[] compatible = classFile.transformClass(
+                newModel,
+                ClassTransform.ACCEPT_ALL.andThen(
+                    ClassTransform.endHandler(builder -> {
+                        retainedFields.forEach(field -> builder.transformField(field, java.lang.classfile.FieldTransform.ACCEPT_ALL));
+                        retainedMethods.forEach(method -> builder.transformMethod(method, java.lang.classfile.MethodTransform.ACCEPT_ALL));
+                    })
+                )
+            );
+            LOGGER.info(
+                "Retained {} removed field and {} removed method identity/identities in {} for live-reference compatibility",
+                retainedFields.size(),
+                retainedMethods.size(),
+                className
+            );
+            return compatible;
+        } catch (RuntimeException e) {
+            throw new IOException("Could not retain live member identities for " + className, e);
         }
     }
 

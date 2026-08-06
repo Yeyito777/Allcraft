@@ -39,6 +39,8 @@ Separate client/server JARs contain:
 
 The JVM cannot remove one loaded class, and arbitrary live objects cannot be proven unreachable. Deletion therefore removes future source/registry reachability but leaves the class's last executable definition resident. This fail-safe rule prevents live menus, entities, callbacks, lambdas, method handles, active frames, and third-party references from being converted into `NoClassDefFoundError`. A later revision/world can redefine the retained identity normally.
 
+The same rule applies inside a redefined class. Methods and fields removed from source are absent from future compilation but retained as binary compatibility members in the runtime definition. Existing hidden lambdas, method handles, codecs, callbacks, and objects can therefore finish using their old symbolic identities instead of failing later with `NoSuchMethodError` or `NoSuchFieldError`; new source cannot acquire those retired members.
+
 ## Lifecycle hooks
 
 `source/allcraft-revision.json` may name arbitrary static hook classes independently for each side:
@@ -92,6 +94,8 @@ Every declared hook/entrypoint class must exist in the selected source revision 
 Any failure before finalization sends `ABORT`. Modified definitions are restored, new classes lose their registered/cache reachability but remain executable for existing references, rollback hooks receive their checkpoints, and client/server resource overlays return to the committed manifest. The publication remains on probation through the client/server acknowledgement barrier: an exception raised when the server resumes the newly patched tick is caught at that barrier, rolled back, and returned to the AI as repair diagnostics instead of crashing the world. This safely detects missing state migration; it does not pretend that arbitrary semantic migration is automatically inferable.
 
 Integrated single-player has one JVM and therefore one physical class identity for server/client name overlaps. The server transaction owns every overlapping definition for that patch; the integrated-client transaction publishes only its non-overlapping classes, hooks, registries, and resources. Rollback preserves that ownership order so a queued client activation cannot reinstall a server-rejected definition.
+
+Server data decoding is strict inside the transaction: a malformed recipe, loot table, tag, or unknown runtime registry key fails the reload future and rolls the candidate back. Invalid data is never silently logged and finalized as a partially installed revision.
 
 ## Recovery and world switching
 

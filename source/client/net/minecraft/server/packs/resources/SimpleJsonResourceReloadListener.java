@@ -60,13 +60,14 @@ public abstract class SimpleJsonResourceReloadListener<T> extends SimplePreparab
             Identifier id = lister.fileToId(location);
 
             try (Reader reader = entry.getValue().openAsReader()) {
-                codec.parse(ops, StrictJsonParser.parse(reader)).ifSuccess(parsed -> {
-                    if (result.putIfAbsent(id, (T)parsed) != null) {
-                        throw new IllegalStateException("Duplicate data file ignored with ID " + id);
-                    }
-                }).ifError(error -> LOGGER.error("Couldn't parse data file '{}' from '{}': {}", id, location, error));
+                T parsed = codec.parse(ops, StrictJsonParser.parse(reader)).getOrThrow(
+                    message -> new JsonParseException("Couldn't parse data file '" + id + "' from '" + location + "': " + message)
+                );
+                if (result.putIfAbsent(id, parsed) != null) {
+                    throw new IllegalStateException("Duplicate data file with ID " + id);
+                }
             } catch (JsonParseException | IllegalArgumentException | IOException e) {
-                LOGGER.error("Couldn't parse data file '{}' from '{}'", id, location, e);
+                throw new IllegalStateException("Couldn't parse data file '" + id + "' from '" + location + "'", e);
             }
         }
     }

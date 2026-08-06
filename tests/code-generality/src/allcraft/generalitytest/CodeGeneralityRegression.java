@@ -87,9 +87,10 @@ public final class CodeGeneralityRegression {
         require(jarContains(revisionOne.serverArtifactPath(), "data/allcraft/allcraft-test/one.json"), "server data was misclassified");
         AllcraftRuntime.Transaction first = AllcraftRuntime.stage(revisionOne.clientArtifactPath(), revisionOne.clientSha256());
         AllcraftRuntime.ApplyResult firstResult = first.publish();
-        require(firstResult.addedClasses() >= 3, "revision one did not add all arbitrary client classes");
+        require(firstResult.addedClasses() >= 4, "revision one did not add all arbitrary client classes");
         require("v1-a".equals(callProbe()), "revision one method was not installed");
         require(probeValue() == 11, "revision one live/static migration did not run");
+        require("lambda-v1".equals(callLambdaProbe()), "revision one live lambda was not initialized");
         first.finish();
         commit(firstWorld, revisionOne);
         first.seal();
@@ -123,6 +124,7 @@ public final class CodeGeneralityRegression {
         second.publish();
         require("v2-a:structural".equals(callProbe()), "method/field structural evolution was not installed");
         require(probeValue() == 22, "revision two migration did not run");
+        require("lambda-v1".equals(callLambdaProbe()), "existing hidden lambda lost its removed implementation method");
         second.finish();
         commit(firstWorld, revisionTwo);
         second.seal();
@@ -412,6 +414,18 @@ public final class CodeGeneralityRegression {
             StandardCharsets.UTF_8
         );
         Files.writeString(
+            javaRoot.resolve("LambdaProbe.java"),
+            """
+            package allcraft.generality;
+            import java.util.function.Supplier;
+            public final class LambdaProbe {
+                private static final Supplier<String> VALUE = () -> "lambda-v1";
+                public static String value() { return VALUE.get(); }
+            }
+            """,
+            StandardCharsets.UTF_8
+        );
+        Files.writeString(
             javaRoot.resolve("RevisionOneHooks.java"),
             """
             package allcraft.generality;
@@ -477,6 +491,20 @@ public final class CodeGeneralityRegression {
                     String value = context.persistedCheckpoint("probe");
                     if (value != null) Probe.value = Integer.parseInt(value);
                 }
+            }
+            """,
+            StandardCharsets.UTF_8
+        );
+        Files.writeString(
+            javaRoot.resolve("LambdaProbe.java"),
+            """
+            package allcraft.generality;
+            import java.util.function.Supplier;
+            public final class LambdaProbe {
+                private static final Supplier<String> VALUE = new Supplier<>() {
+                    @Override public String get() { return "fresh-v2"; }
+                };
+                public static String value() { return VALUE.get(); }
             }
             """,
             StandardCharsets.UTF_8
@@ -614,6 +642,11 @@ public final class CodeGeneralityRegression {
 
     private static int probeValue() throws Exception {
         return probeClass().getField("value").getInt(null);
+    }
+
+    private static String callLambdaProbe() throws Exception {
+        Class<?> type = Class.forName("allcraft.generality.LambdaProbe", false, CodeGeneralityRegression.class.getClassLoader());
+        return (String)type.getMethod("value").invoke(null);
     }
 
     private static String callLiveProbe(Object probe) throws Exception {

@@ -90,6 +90,7 @@ import net.minecraft.ReportedException;
 import net.minecraft.SharedConstants;
 import net.minecraft.SuppressForbidden;
 import net.minecraft.TracingExecutor;
+import net.minecraft.allcraft.AllcraftRegistries;
 import net.minecraft.core.Registry;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.datafix.DataFixers;
@@ -313,8 +314,12 @@ public class Util {
                 .getSchema(DataFixUtils.makeKey(SharedConstants.getCurrentVersion().dataVersion().version()))
                 .getChoiceType(reference, name);
         } catch (IllegalArgumentException e) {
-            LOGGER.error("No data fixer registered for {}", name);
-            if (SharedConstants.IS_RUNNING_IN_IDE) {
+            if (AllcraftRegistries.mutationAllowed()) {
+                LOGGER.info("Runtime registry entry {} has no historical data-fixer schema, as expected", name);
+            } else {
+                LOGGER.error("No data fixer registered for {}", name);
+            }
+            if (SharedConstants.IS_RUNNING_IN_IDE && !AllcraftRegistries.mutationAllowed()) {
                 throw e;
             }
         }

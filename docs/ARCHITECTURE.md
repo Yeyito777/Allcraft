@@ -112,6 +112,7 @@ patches/
 - New classes are appended to Minecraft's system classloader and loaded without restarting the game.
 - Registry/network-facing logical classes are compiled from `shared/`; side artifacts carry the same hashed class contract and side-only registry factories are rejected.
 - Deleted/world-only classes remain executable but logically unreachable because arbitrary live Java references cannot be proven absent safely.
+- Removed methods and fields likewise remain as source-invisible compatibility identities for existing lambdas, method handles, codecs, callbacks, and live objects.
 - Byte-identical definitions are skipped instead of forcing another JVM-wide redefinition.
 - Optional static artifact entrypoints can initialize newly added code at activation.
 - Before activation, a background coordinator compiles authoritative world source into separate client and server JARs.
