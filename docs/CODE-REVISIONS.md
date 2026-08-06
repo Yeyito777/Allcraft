@@ -22,7 +22,7 @@ source/
 └── allcraft-revision.json     # optional lifecycle hooks
 ```
 
-Every revision is compared with `patches/revisions/current-source.json`. Added, changed, moved, and deleted files are discovered by path and SHA-256. Java reverse dependencies are conservatively recompiled for compatibility validation; only explicitly changed source definitions are published at runtime. This prevents unchanged decompiled vanilla sources from regenerating incompatible synthetic lambda helpers. Outputs are cached by side, compiler, source closure, and classpath identity.
+Every revision is compared with `patches/revisions/current-source.json`. Added, changed, moved, and deleted files are discovered by path and SHA-256. Changed Java sources and declared lifecycle hooks are compiled together against the canonical base plus parent artifacts; unchanged dependencies remain classpath inputs rather than being rebuilt from non-round-trippable decompiled vanilla source. Only explicitly changed source definitions are published at runtime. This prevents unrelated generic-source failures and incompatible regenerated synthetic lambda helpers. Outputs are cached by side, compiler, source set, and classpath identity.
 
 Registry- and network-facing logical registration belongs in `shared/`. The builder verifies that every shared class compiles byte-identically on both sides, embeds a hashed shared-class contract, and rejects side-only registry mutation. Screens, renderers, particle providers, keybindings, and other genuinely side-only integrations remain under `client/` or `server/`.
 
@@ -105,4 +105,4 @@ tests/jvm/run.sh jvm/linux-x64
 tests/ai-worktrees/run.sh
 ```
 
-The generality suite covers arbitrary client/server inputs, shared-contract divergence/tampering, dependency closure, content-addressed cache hits, resource movement, structural class evolution, live/static migration, compile and migration failures, rollback, live-object-safe retirement, world switching, reconnect replay, and JFR-enabled execution. The JVM suite covers methods, fields, constructors, interfaces, active frames, C2, attach, and JFR behavior.
+The generality suite covers arbitrary client/server inputs, shared-contract divergence/tampering, changed-source compilation boundaries, content-addressed cache hits, resource movement, structural class evolution, live/static migration, compile and migration failures, rollback, live-object-safe retirement, world switching, reconnect replay, and JFR-enabled execution. The JVM suite covers methods, fields, constructors, interfaces, active frames, C2, attach, and JFR behavior.

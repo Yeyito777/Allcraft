@@ -100,8 +100,8 @@ public final class CodeGeneralityRegression {
         );
         assertArtifact(revisionTwo.clientArtifactPath(), 2L, List.of("allcraft.generality.RevisionTwoHooks"), List.of());
         require(
-            revisionTwo.client().compiledSources().contains("client/allcraft/generality/ProbeConsumer.java"),
-            "reverse dependency closure did not recompile an unchanged dependent source"
+            !revisionTwo.client().compiledSources().contains("client/allcraft/generality/ProbeConsumer.java"),
+            "unchanged decompiled dependency was incorrectly pulled into incremental compilation"
         );
         require(
             !jarContains(revisionTwo.clientArtifactPath(), "allcraft/generality/ProbeConsumer.class"),

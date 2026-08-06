@@ -321,7 +321,14 @@ public final class AllcraftRevisionBuilder {
                 compilationSeeds.add(entry.getKey());
             }
         }
-        Set<String> closure = dependencyClosure(side, sourceRoot, current, compilationSeeds, deletedJava, previous);
+        // Resolve unchanged dependencies from the canonical base/parent artifacts. Decompiled
+        // vanilla source is an editing aid, not a second build of Minecraft: compiling broad
+        // reverse-dependency closures pulls in unrelated, non-round-trippable generic sources and
+        // makes an otherwise valid local edit fail. Every actually changed source is already in
+        // this set, so mutually dependent additions/edits are still compiled together.
+        Set<String> closure = compilationSeeds.stream()
+            .filter(path -> current.files.containsKey(path) && !deletedJava.contains(path))
+            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
         Compilation compilation = closure.isEmpty()
             ? Compilation.empty()
             : compile(side, sourceRoot, patchesRoot, worldManifest, closure);
