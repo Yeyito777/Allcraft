@@ -78,6 +78,9 @@ read
 write
 edit
 patch
+bash
+glob
+grep
 minecraft_glob
 minecraft_grep
 ```
