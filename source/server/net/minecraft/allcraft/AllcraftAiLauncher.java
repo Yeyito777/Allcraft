@@ -16,6 +16,7 @@ import net.minecraft.commands.CommandSourceStack;
 public final class AllcraftAiLauncher {
     static final Path EXO_CLI = Path.of("/home/yeyito/Workspace/exocortex/external-tools/exo-cli/bin/exo");
     static final Path TOOL_MODULE_RELATIVE = Path.of(".allcraft/exocortex/minecraft-tools.ts");
+    static final String MODEL = "openai/gpt-5.6-luna";
     private static final Pattern CONVERSATION_ID = Pattern.compile("[0-9]+-[a-z0-9]{6}");
 
     private AllcraftAiLauncher() {
@@ -42,6 +43,8 @@ public final class AllcraftAiLauncher {
         List<String> command = new ArrayList<>(List.of(
             executable.toString(),
             "send",
+            "--model",
+            MODEL,
             "--custom-tool",
             toolModule.toString(),
             "--internal-tool",
