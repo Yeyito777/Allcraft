@@ -118,6 +118,8 @@ patches/
 - `javac` runs in a constrained child JVM so compilation cannot block or pollute the game JVM's heap.
 - Compiler outputs are cached by source, classpath, compiler, and side; only changed inputs invalidate them.
 - At tick `N`, the server applies its server JAR and clients apply the corresponding client JAR.
+- Gameplay pauses behind the activation barrier while packet processing continues, then resumes for a reversible probation tick before the revision is finalized.
+- In integrated single-player, the server transaction owns overlapping class names in the shared JVM; the client transaction cannot overwrite or independently roll back that same physical class identity.
 - Opening an evolved single-player world restores its ordered server and integrated-client artifacts automatically.
 - World exit retires runtime code only after the client view and integrated server have fully drained their live objects.
 

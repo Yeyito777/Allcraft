@@ -35,6 +35,7 @@ public final class CodeGeneralityRegression {
         System.setProperty("allcraft.baseJar", baseJar.toString());
 
         testSharedContractGuards(work);
+        testIntegratedClassOwnership(work);
 
         Path firstWorld = world(work.resolve("world-a"));
         AllcraftRevisionBuilder.initializeBaseline(firstWorld);
@@ -215,7 +216,57 @@ public final class CodeGeneralityRegression {
         require("v2-a:structural".equals(callProbe()), "reconnect replay did not restore safe logical retirement");
         AllcraftRuntime.resetToBase();
 
-        System.out.println("PASS code-generality: differ, shared contracts, cache, structural DCEVM, migrations, rollback, safe retirement, world switch, replay");
+        System.out.println("PASS code-generality: differ, shared contracts, integrated ownership, cache, structural DCEVM, migrations, rollback, safe retirement, world switch, replay");
+    }
+
+    private static void testIntegratedClassOwnership(Path work) throws Exception {
+        Path integrated = world(work.resolve("integrated-ownership"));
+        AllcraftRevisionBuilder.initializeBaseline(integrated);
+        Path client = integrated.resolve("source/client/allcraft/integrated/Overlap.java");
+        Path server = integrated.resolve("source/server/allcraft/integrated/Overlap.java");
+        Files.createDirectories(client.getParent());
+        Files.createDirectories(server.getParent());
+        Files.writeString(
+            client,
+            "package allcraft.integrated; public final class Overlap { public static String side() { return \"client\"; } }\n",
+            StandardCharsets.UTF_8
+        );
+        Files.writeString(
+            server,
+            "package allcraft.integrated; public final class Overlap { public static String side() { return \"server\"; } }\n",
+            StandardCharsets.UTF_8
+        );
+        AllcraftRevisionBuilder.PreparedRevision prepared = AllcraftRevisionBuilder.prepare(
+            integrated, AllcraftRevisionBuilder.Request.production("integrated-ownership")
+        );
+        AllcraftRuntime.Transaction serverTransaction = AllcraftRuntime.stage(
+            prepared.serverArtifactPath(), prepared.serverSha256()
+        );
+        AllcraftRuntime.Transaction clientTransaction = AllcraftRuntime.stage(
+            prepared.clientArtifactPath(), prepared.clientSha256()
+        );
+        serverTransaction.publish();
+        require("server".equals(integratedSide()), "integrated server definition was not installed");
+        AllcraftRuntime.ApplyResult clientResult = clientTransaction.publish();
+        require(clientResult.unchangedClasses() >= 1, "integrated client did not delegate an overlapping class to the server transaction");
+        require("server".equals(integratedSide()), "integrated client overwrote the server-owned class identity");
+        clientTransaction.rollback();
+        require("server".equals(integratedSide()), "integrated client rollback changed a server-owned class identity");
+        serverTransaction.rollback();
+
+        AllcraftRuntime.Transaction independentClient = AllcraftRuntime.stage(
+            prepared.clientArtifactPath(), prepared.clientSha256()
+        );
+        independentClient.publish();
+        require("client".equals(integratedSide()), "server class ownership leaked after rollback");
+        independentClient.rollback();
+        AllcraftRevisionBuilder.discard(prepared);
+        AllcraftRuntime.resetToBase();
+    }
+
+    private static String integratedSide() throws Exception {
+        Class<?> type = Class.forName("allcraft.integrated.Overlap");
+        return (String)type.getMethod("side").invoke(null);
     }
 
     private static void testSharedContractGuards(Path work) throws Exception {

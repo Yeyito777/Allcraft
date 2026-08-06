@@ -82,13 +82,16 @@ Every declared hook/entrypoint class must exist in the selected source revision 
 3. Stream client bytes; all peers report `READY` only after staging/preflight.
 4. Publish dedicated prepare/rollback hook implementations.
 5. Run `prepare` against the old game revision.
-6. Atomically redefine loaded classes and activate genuine additions at the scheduled tick.
+6. Atomically redefine loaded classes and activate genuine additions at the scheduled tick; packet processing continues while gameplay is paused at the publication barrier.
 7. Run `migrate`, legacy activation entrypoints, the server-assigned registry plan, and resource/data publication.
 8. Peers report `APPLIED` with a complete registry-ID fingerprint; any disagreement aborts publication.
-9. Run `commit`; peers report `COMMITTED`.
-10. Persist the source snapshot and manifest, send `FINALIZE`, and seal the revision into the world-exit rollback chain.
+9. Run `commit`; peers report `COMMITTED` while all transactions remain reversible.
+10. Resume one complete gameplay tick as a probation tick. An immediate state-migration or linkage failure rolls every peer back and becomes AI repair feedback.
+11. Persist the source snapshot and manifest, send `FINALIZE`, and seal the revision into the world-exit rollback chain.
 
 Any failure before finalization sends `ABORT`. Modified definitions are restored, new classes lose their registered/cache reachability but remain executable for existing references, rollback hooks receive their checkpoints, and client/server resource overlays return to the committed manifest. The publication remains on probation through the client/server acknowledgement barrier: an exception raised when the server resumes the newly patched tick is caught at that barrier, rolled back, and returned to the AI as repair diagnostics instead of crashing the world. This safely detects missing state migration; it does not pretend that arbitrary semantic migration is automatically inferable.
+
+Integrated single-player has one JVM and therefore one physical class identity for server/client name overlaps. The server transaction owns every overlapping definition for that patch; the integrated-client transaction publishes only its non-overlapping classes, hooks, registries, and resources. Rollback preserves that ownership order so a queued client activation cannot reinstall a server-rejected definition.
 
 ## Recovery and world switching
 

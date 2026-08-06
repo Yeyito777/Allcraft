@@ -990,8 +990,6 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          }
       }
 
-      this.tickCount++;
-      AllcraftPatchServer.tick(this);
       this.tickRateManager.tick();
       this.tickChildren(haveTime);
       if (nano - this.lastServerStatus >= STATUS_EXPIRE_TIME_NANOS) {
@@ -1023,6 +1021,13 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
       profiler.push("scheduledPacketProcessing");
       this.packetProcessor.processQueuedPackets();
       profiler.pop();
+      this.tickCount++;
+      AllcraftPatchServer.tick(this);
+      if (AllcraftPatchServer.blocksGameplay(this)) {
+         this.tickFrame.end();
+         profiler.pop();
+         return;
+      }
       this.tickServer(sprinting ? () -> false : this::haveTime);
       this.tickFrame.end();
       profiler.pop();

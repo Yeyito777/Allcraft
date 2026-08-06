@@ -52,6 +52,7 @@ public final class AllcraftRuntime {
     private static final List<Transaction> ACTIVE_REVISIONS = new ArrayList<>();
     private static final List<Transaction> PENDING_COMMITS = new ArrayList<>();
     private static final List<JarFile> APPENDED_ARTIFACTS = new ArrayList<>();
+    private static final Map<String, Transaction> INTEGRATED_SERVER_PUBLICATIONS = new HashMap<>();
 
     private AllcraftRuntime() {
     }
@@ -233,6 +234,7 @@ public final class AllcraftRuntime {
         List<ClassDefinition> earlyDefinitions = new ArrayList<>();
         List<ClassDefinition> definitions = new ArrayList<>();
         Map<Class<?>, byte[]> changed = new IdentityHashMap<>();
+        Transaction integratedServerOwner = integratedServerOwner(transaction);
         JarFile appended = null;
         long redefineMillis = 0L;
         try {
@@ -248,6 +250,9 @@ public final class AllcraftRuntime {
                 APPENDED_ARTIFACTS.add(appended);
                 Map<String, Class<?>> beforePrepare = loadedClasses(instrumentation, loader);
                 for (String className : transaction.addedClasses) {
+                    if (integratedServerOwner != null && integratedServerOwner.classes.containsKey(className)) {
+                        continue;
+                    }
                     if (beforePrepare.containsKey(className) || ADDED_CLASSES.contains(className)) {
                         continue;
                     }
@@ -268,6 +273,9 @@ public final class AllcraftRuntime {
             earlyHookNames.addAll(transaction.hooks.rollback);
             Map<Class<?>, byte[]> earlyChanged = new IdentityHashMap<>();
             for (String className : earlyHookNames) {
+                if (integratedServerOwner != null && integratedServerOwner.classes.containsKey(className)) {
+                    continue;
+                }
                 byte[] desired = transaction.classes.get(className);
                 Class<?> type = hookLoaded.get(className);
                 if (desired == null || type == null) {
@@ -312,6 +320,14 @@ public final class AllcraftRuntime {
             Map<String, Class<?>> loaded = loadedClasses(instrumentation, loader);
             for (Map.Entry<String, byte[]> entry : transaction.classes.entrySet()) {
                 String className = entry.getKey();
+                if (integratedServerOwner != null && integratedServerOwner.classes.containsKey(className)) {
+                    // An integrated client and its server share one JVM/class identity. The server
+                    // transaction owns overlapping definitions; the client still publishes its
+                    // side-only hooks/resources but must never overwrite or later roll back those
+                    // server definitions with a second independently compiled class body.
+                    skipped.add(className);
+                    continue;
+                }
                 if (transaction.deletedClasses.contains(className)) {
                     // The ordinary JVM cannot unload one class, and replacing every method with a
                     // throwing tombstone corrupts live menus/entities/tasks that still own it. A
@@ -381,6 +397,9 @@ public final class AllcraftRuntime {
             );
             AllcraftRegistries.run(transaction.registryTransaction, () -> invokeEntrypoints(transaction.entrypoints, loader));
             transaction.registryTransaction.closePublication();
+            if ("server".equals(transaction.context.side)) {
+                INTEGRATED_SERVER_PUBLICATIONS.put(transaction.context.patchId, transaction);
+            }
         } catch (Exception | Error failure) {
             // Appended search paths are process-lifetime state by Instrumentation contract. Keep
             // the JarFile open and let rollback tombstone any introduced class that was loaded.
@@ -489,12 +508,28 @@ public final class AllcraftRuntime {
         }
         transaction.rolledBack = true;
         PENDING_COMMITS.remove(transaction);
+        INTEGRATED_SERVER_PUBLICATIONS.remove(transaction.context.patchId, transaction);
         if (!errors.isEmpty()) {
             IllegalStateException failure = new IllegalStateException("Allcraft transaction rollback was incomplete");
             errors.forEach(failure::addSuppressed);
             throw failure;
         }
         LOGGER.warn("Rolled back Allcraft transaction {}", transaction.context.patchId);
+    }
+
+    private static Transaction integratedServerOwner(Transaction transaction) {
+        if (!"client".equals(transaction.context.side)) {
+            return null;
+        }
+        Transaction owner = INTEGRATED_SERVER_PUBLICATIONS.get(transaction.context.patchId);
+        if (owner == null
+            || owner.rolledBack
+            || !owner.published
+            || !owner.context.worldId.equals(transaction.context.worldId)
+            || owner.context.toRevision != transaction.context.toRevision) {
+            return null;
+        }
+        return owner;
     }
 
     private static void verifyClasses(Map<String, byte[]> classes) throws IOException {

@@ -143,6 +143,15 @@ public final class AllcraftPatchServer {
             || ACTIVE_RESOURCE_RESTORES.containsKey(server);
     }
 
+    /** Keeps packet processing alive while no gameplay is allowed to observe a half-published revision. */
+    public static boolean blocksGameplay(MinecraftServer server) {
+        TestRun run = ACTIVE_TESTS.get(server);
+        return run != null
+            && (run.phase == Phase.WAITING_FOR_APPLIED
+                || run.phase == Phase.WAITING_FOR_COMMITTED
+                || run.phase == Phase.WAITING_FOR_ROLLBACK);
+    }
+
     /**
      * A newly published method can expose missing semantic migration only when the rest of the
      * server tick resumes. Keep that exception inside the still-reversible publication barrier:
@@ -156,7 +165,9 @@ public final class AllcraftPatchServer {
         if (patch.authoritativeCommitted
             || patch.serverTransaction == null
             || !patch.serverTransaction.started()
-            || (run.phase != Phase.WAITING_FOR_APPLIED && run.phase != Phase.WAITING_FOR_COMMITTED)) return false;
+            || (run.phase != Phase.WAITING_FOR_APPLIED
+                && run.phase != Phase.WAITING_FOR_COMMITTED
+                && run.phase != Phase.PROBATION)) return false;
         String reason = "Post-activation server tick failed: " + failure.getClass().getSimpleName() + ": " + conciseMessage(failure);
         LOGGER.error("Recovering Allcraft revision {} after a post-activation server tick failure", patch.revision, failure);
         try {
@@ -471,11 +482,20 @@ public final class AllcraftPatchServer {
                 }
                 case WAITING_FOR_COMMITTED -> {
                     if (run.committedPlayers.containsAll(run.expectedPlayers)) {
+                        // Let one complete gameplay tick execute while every definition is still
+                        // reversible. The following tick finalizes only if this probation tick did
+                        // not expose a missing live-state migration or other immediate failure.
+                        run.phase = Phase.PROBATION;
+                        run.phaseStartedAt = tick;
+                    } else {
+                        checkTimeout(server, run, tick, "COMMITTED");
+                    }
+                }
+                case PROBATION -> {
+                    if (tick > run.phaseStartedAt) {
                         if (run.listener != null) run.listener.beforeCommit(patch.preparedRevision);
                         commitRevision(run, patch);
                         finalizeCommittedRevision(server, run, patch);
-                    } else {
-                        checkTimeout(server, run, tick, "COMMITTED");
                     }
                 }
                 case WAITING_FOR_ROLLBACK -> {
@@ -484,6 +504,16 @@ public final class AllcraftPatchServer {
                     }
                     boolean resourcesDone = patch.serverResourceFuture == null || patch.serverResourceFuture.isDone();
                     if (resourcesDone && run.rollbackPlayers.containsAll(run.expectedPlayers)) {
+                        try {
+                            if (patch.serverTransaction != null && patch.serverTransaction.started()) {
+                                patch.serverTransaction.rollback();
+                            }
+                        } catch (Exception e) {
+                            LOGGER.error("Failed to roll back server classes for {}", patch.patchId, e);
+                            run.failureReason = (run.failureReason == null ? "transaction rollback failed" : run.failureReason)
+                                + "; server class rollback failed: "
+                                + conciseMessage(e);
+                        }
                         failTest(server, run, run.failureReason == null ? "transaction rolled back" : run.failureReason);
                     } else {
                         checkTimeout(server, run, tick, "ROLLBACK");
@@ -953,14 +983,9 @@ public final class AllcraftPatchServer {
         }
         Patch patch = run.current();
         run.failureReason = reason;
-        try {
-            if (patch.serverTransaction != null && patch.serverTransaction.started()) {
-                patch.serverTransaction.rollback();
-            }
-        } catch (Exception e) {
-            LOGGER.error("Failed to roll back server classes for {}", patch.patchId, e);
-            run.failureReason += "; server class rollback failed: " + conciseMessage(e);
-        }
+        // Preserve the server-owned definitions until clients have rolled back their side-only
+        // state. Integrated single-player shares one classloader, so rolling the server back first
+        // could let a still-queued client ACTIVATE re-install the rejected class body.
         CompletableFuture<AllcraftServerResources.ApplyResult> inFlight = patch.serverResourceFuture;
         patch.serverResourceFuture = inFlight == null
             ? AllcraftServerResources.rollback(server, run.patchesRoot)
@@ -1174,6 +1199,7 @@ public final class AllcraftPatchServer {
         SCHEDULED,
         WAITING_FOR_APPLIED,
         WAITING_FOR_COMMITTED,
+        PROBATION,
         WAITING_FOR_ROLLBACK,
         BETWEEN_PATCHES
     }
