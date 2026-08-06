@@ -51,6 +51,8 @@ The checked-out `allcraft/main` branch and `refs/allcraft/revisions/<n>` identif
 10. Only at the commit/finalize boundary does canonical source fast-forward to the candidate. Any abort restores `refs/allcraft/revisions/<parent>` and sends diagnostics back to Exocortex for another repair turn.
 11. Finalized/cancelled worktrees and branches are removed. Failed worktrees are retained until repaired or cancelled.
 
+The 16-request gameplay benchmark drives this same path in two waves through `/allcraft test suite-1-a` and `/allcraft test suite-1-b`. It is documented in [`AI-BENCHMARK.md`](AI-BENCHMARK.md); it does not use fixture-only compiler behavior.
+
 The pipeline is intentionally capability-oriented rather than sandboxed. The prompt confines the trusted agent to its worktree, and integration verifies that canonical source remained clean; this is a correctness boundary, not a hostile-code security boundary.
 
 ## Exocortex integration

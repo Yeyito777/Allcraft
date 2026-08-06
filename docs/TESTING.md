@@ -6,6 +6,8 @@ Open a world, then run:
 /allcraft test <test-name>
 ```
 
+The expensive real-agent benchmark is split across `/allcraft test suite-1-a` and `/allcraft test suite-1-b`. It queues 16 Luna/max gameplay requests rather than fixture patches; see [`AI-BENCHMARK.md`](AI-BENCHMARK.md) before running it.
+
 The networking tests edit an ordinary world-source fixture and submit five sequential revisions through the production differ/artifact pipeline. They stream, cache, schedule, activate, and acknowledge five distinct compiled patch JARs:
 
 | Test | Checks |
@@ -76,6 +78,7 @@ For the non-rendering production-pipeline/JVM regression, run:
 ```bash
 tests/registries/run.sh
 tests/code-generality/run.sh
+tests/ai-benchmark/run.sh
 tests/jvm/run.sh jvm/linux-x64
 tests/jvm/minecraft-smoke.sh jvm/linux-x64 new-mob new-music-disc new-keybind lapis-crafting-table
 ```

@@ -61,7 +61,7 @@ public final class AllcraftAiJobs {
         WORLDS.put(normalized, jobs);
     }
 
-    public static int start(CommandSourceStack source, String request) {
+    public static synchronized int start(CommandSourceStack source, String request) {
         String exactRequest = request == null ? "" : request.trim();
         if (exactRequest.isBlank()) {
             source.sendFailure(Component.literal("Usage: /allcraft ai <request>"));
@@ -70,24 +70,12 @@ public final class AllcraftAiJobs {
         MinecraftServer server = source.getServer();
         Path worldRoot = worldRoot(server);
         try {
-            WorldJobs world = world(worldRoot);
-            if (!AllcraftSourceRepository.isCleanCanonical(worldRoot)) {
-                source.sendFailure(Component.literal("Canonical world source has unpublished changes; use /allcraft apply first"));
-                return 0;
-            }
-            JsonObject manifest = readJson(worldRoot.resolve("patches/manifest.json"));
-            String id = UUID.randomUUID().toString();
-            long sequence = world.nextSequence++;
-            long revision = manifest.get("currentRevision").getAsLong();
-            Job job = new Job(id, exactRequest, sequence, revision);
-            job.baseCommit = AllcraftSourceRepository.canonicalCommit(worldRoot);
-            job.branch = AllcraftSourceRepository.branchFor(id);
-            job.worktree = worldRoot.resolve("source/.worktrees").resolve(id).toAbsolutePath().normalize().toString();
-            job.state = State.TRIGGERED;
-            world.jobs.put(id, job);
-            world.persist(job);
+            BatchResult result = enqueueBatch(
+                worldRoot, null, null, List.of(new BatchRequest("request", exactRequest)), false
+            );
+            BatchJob queued = result.jobs().getFirst();
             source.sendSuccess(
-                () -> Component.literal("Queued Allcraft AI job " + shortId(id) + " at world revision " + revision)
+                () -> Component.literal("Queued Allcraft AI job " + shortId(queued.jobId()) + " at world revision " + result.baseRevision())
                     .withStyle(ChatFormatting.AQUA),
                 false
             );
@@ -97,6 +85,138 @@ public final class AllcraftAiJobs {
             source.sendFailure(Component.literal("Failed to queue Allcraft AI job: " + concise(e)));
             return 0;
         }
+    }
+
+    /** Atomically persists a related group of jobs before making any of them visible to the scheduler. */
+    static synchronized BatchResult enqueueBatch(
+        Path worldRoot,
+        String suiteRunId,
+        String suitePhase,
+        List<BatchRequest> requests,
+        boolean requireImmediateEditorCapacity
+    ) throws IOException {
+        Path normalized = worldRoot.toAbsolutePath().normalize();
+        if (requests.isEmpty()) throw new IOException("An AI batch must contain at least one request");
+        if (requests.size() > MAX_PARALLEL_EDITORS) {
+            throw new IOException("An AI batch cannot exceed " + MAX_PARALLEL_EDITORS + " requests");
+        }
+        List<BatchRequest> normalizedRequests = new ArrayList<>();
+        var caseIds = new java.util.LinkedHashSet<String>();
+        for (BatchRequest request : requests) {
+            String caseId = request.caseId() == null ? "" : request.caseId().trim();
+            String text = request.request() == null ? "" : request.request().trim();
+            if (caseId.isEmpty() || text.isEmpty()) throw new IOException("AI batch cases require a non-empty ID and request");
+            if (!caseIds.add(caseId)) throw new IOException("Duplicate AI batch case " + caseId);
+            normalizedRequests.add(new BatchRequest(caseId, text));
+        }
+
+        WorldJobs world = world(normalized);
+        if (!AllcraftSourceRepository.isCleanCanonical(normalized)) {
+            throw new IOException("Canonical world source has unpublished changes; use /allcraft apply first");
+        }
+        if (requireImmediateEditorCapacity && editorDemand() + normalizedRequests.size() > MAX_PARALLEL_EDITORS) {
+            throw new IOException(
+                "AI editor capacity is insufficient: " + editorDemand() + " already active/queued, "
+                    + normalizedRequests.size() + " requested, maximum " + MAX_PARALLEL_EDITORS
+            );
+        }
+
+        JsonObject manifest = readJson(normalized.resolve("patches/manifest.json"));
+        long revision = manifest.get("currentRevision").getAsLong();
+        String baseCommit = AllcraftSourceRepository.canonicalCommit(normalized);
+        long firstSequence = world.nextSequence;
+        List<Job> staged = new ArrayList<>();
+        List<Path> stagedDirectories = new ArrayList<>();
+        for (int index = 0; index < normalizedRequests.size(); index++) {
+            BatchRequest request = normalizedRequests.get(index);
+            String id = UUID.randomUUID().toString();
+            Job job = new Job(id, request.request(), firstSequence + index, revision);
+            job.baseCommit = baseCommit;
+            job.branch = AllcraftSourceRepository.branchFor(id);
+            job.worktree = normalized.resolve("source/.worktrees").resolve(id).toString();
+            job.suiteRunId = suiteRunId;
+            job.suitePhase = suitePhase;
+            job.suiteCaseId = request.caseId();
+            staged.add(job);
+            stagedDirectories.add(world.jobsRoot.resolve(id));
+        }
+
+        String batchId = UUID.randomUUID().toString();
+        Path batchJournal = normalized.resolve("patches/ai/batches").resolve(batchId + ".json");
+        JsonObject journal = new JsonObject();
+        journal.addProperty("format", 1);
+        journal.addProperty("batchId", batchId);
+        journal.addProperty("state", "preparing");
+        var journalJobs = new com.google.gson.JsonArray();
+        for (Job job : staged) journalJobs.add(job.id);
+        journal.add("jobs", journalJobs);
+        writeJsonAtomically(batchJournal, journal);
+        try {
+            for (Job job : staged) world.persist(job);
+            journal.addProperty("state", "committed");
+            writeJsonAtomically(batchJournal, journal);
+        } catch (Exception failure) {
+            IOException result = failure instanceof IOException io ? io : new IOException("Could not persist AI batch", failure);
+            for (Path directory : stagedDirectories) {
+                try {
+                    deleteTree(directory);
+                } catch (IOException cleanupFailure) {
+                    result.addSuppressed(cleanupFailure);
+                }
+            }
+            try {
+                Files.deleteIfExists(batchJournal);
+            } catch (IOException cleanupFailure) {
+                result.addSuppressed(cleanupFailure);
+            }
+            throw result;
+        }
+
+        for (Job job : staged) world.jobs.put(job.id, job);
+        world.nextSequence = firstSequence + staged.size();
+        try {
+            Files.deleteIfExists(batchJournal);
+        } catch (IOException cleanupFailure) {
+            LOGGER.warn("Could not remove committed AI batch journal {}; restart recovery will remove it", batchJournal, cleanupFailure);
+        }
+        return new BatchResult(
+            revision,
+            staged.stream().map(job -> new BatchJob(job.suiteCaseId, job.id, job.sequence)).toList()
+        );
+    }
+
+    static synchronized List<JobSnapshot> suiteJobs(Path worldRoot, String suiteRunId, String suitePhase) throws IOException {
+        WorldJobs world = world(worldRoot.toAbsolutePath().normalize());
+        return world.jobs.values().stream()
+            .filter(job -> java.util.Objects.equals(job.suiteRunId, suiteRunId))
+            .filter(job -> java.util.Objects.equals(job.suitePhase, suitePhase))
+            .sorted(Comparator.comparingLong(job -> job.sequence))
+            .map(AllcraftAiJobs::snapshot)
+            .toList();
+    }
+
+    static synchronized List<JobSnapshot> jobSnapshots(Path worldRoot, List<String> jobIds) throws IOException {
+        WorldJobs world = world(worldRoot.toAbsolutePath().normalize());
+        List<JobSnapshot> result = new ArrayList<>();
+        for (String id : jobIds) {
+            Job job = world.jobs.get(id);
+            if (job == null) throw new IOException("Missing AI job " + id);
+            result.add(snapshot(job));
+        }
+        return List.copyOf(result);
+    }
+
+    private static JobSnapshot snapshot(Job job) {
+        return new JobSnapshot(
+            job.id,
+            job.suiteCaseId,
+            job.state.id,
+            job.attempt,
+            job.resultRevision,
+            job.cleanupComplete,
+            job.sequence,
+            job.diagnostics
+        );
     }
 
     public static synchronized void tick(MinecraftServer server) {
@@ -229,6 +349,19 @@ public final class AllcraftAiJobs {
         return count;
     }
 
+    private static int editorDemand() {
+        int count = 0;
+        for (WorldJobs world : WORLDS.values()) {
+            for (Job job : world.jobs.values()) {
+                if (job.state == State.TRIGGERED
+                    || job.state == State.QUEUED
+                    || (job.state == State.EDITING && !job.turnComplete)
+                    || job.state == State.RETRYING) count++;
+            }
+        }
+        return count;
+    }
+
     private static Path worldRoot(MinecraftServer server) {
         return server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
     }
@@ -240,6 +373,7 @@ public final class AllcraftAiJobs {
         private final Map<String, Pending> pending = new LinkedHashMap<>();
         private long nextSequence = 1L;
         private volatile boolean loaded = true;
+        private boolean loading;
         private long generation;
 
         private WorldJobs(Path root) {
@@ -248,20 +382,50 @@ public final class AllcraftAiJobs {
         }
 
         private void load() throws IOException {
-            Files.createDirectories(this.jobsRoot);
-            try (var paths = Files.list(this.jobsRoot)) {
-                for (Path directory : paths.filter(Files::isDirectory).sorted().toList()) {
-                    Path stateFile = directory.resolve("job.json");
-                    if (!Files.isRegularFile(stateFile)) continue;
-                    try {
-                        Job job = Job.fromJson(readJson(stateFile));
-                        recover(job);
-                        this.jobs.put(job.id, job);
-                        this.nextSequence = Math.max(this.nextSequence, job.sequence + 1L);
-                        persist(job);
-                    } catch (Exception e) {
-                        LOGGER.error("Could not recover Allcraft AI job from {}", stateFile, e);
+            this.loading = true;
+            try {
+                Files.createDirectories(this.jobsRoot);
+                recoverBatchJournals();
+                try (var paths = Files.list(this.jobsRoot)) {
+                    for (Path directory : paths.filter(Files::isDirectory).sorted().toList()) {
+                        Path stateFile = directory.resolve("job.json");
+                        if (!Files.isRegularFile(stateFile)) continue;
+                        try {
+                            Job job = Job.fromJson(readJson(stateFile));
+                            recover(job);
+                            this.jobs.put(job.id, job);
+                            this.nextSequence = Math.max(this.nextSequence, job.sequence + 1L);
+                            persist(job);
+                        } catch (Exception e) {
+                            LOGGER.error("Could not recover Allcraft AI job from {}", stateFile, e);
+                        }
                     }
+                }
+            } finally {
+                this.loading = false;
+            }
+        }
+
+        private void recoverBatchJournals() throws IOException {
+            Path root = this.root.resolve("patches/ai/batches");
+            if (!Files.isDirectory(root)) return;
+            try (var paths = Files.list(root)) {
+                for (Path journalPath : paths.filter(path -> path.getFileName().toString().endsWith(".json")).sorted().toList()) {
+                    JsonObject journal = readJson(journalPath);
+                    if (integer(journal, "format", 0) != 1 || !journal.has("state") || !journal.has("jobs")) {
+                        throw new IOException("Unsupported AI batch journal " + journalPath);
+                    }
+                    String state = journal.get("state").getAsString();
+                    if (state.equals("preparing")) {
+                        for (var element : journal.getAsJsonArray("jobs")) {
+                            String id = element.getAsString();
+                            if (!id.matches("[0-9a-fA-F-]{36}")) throw new IOException("Invalid AI batch job ID in " + journalPath);
+                            deleteTree(this.jobsRoot.resolve(id));
+                        }
+                    } else if (!state.equals("committed")) {
+                        throw new IOException("Unknown AI batch journal state " + state + " in " + journalPath);
+                    }
+                    Files.deleteIfExists(journalPath);
                 }
             }
         }
@@ -668,6 +832,9 @@ public final class AllcraftAiJobs {
 
         private void persist(Job job) throws IOException {
             writeJsonAtomically(this.jobsRoot.resolve(job.id).resolve("job.json"), job.toJson());
+            if (!this.loading && job.suiteRunId != null && this.jobs.containsKey(job.id)) {
+                AllcraftAiTestSuites.jobChanged(this.root, job.suiteRunId);
+            }
         }
     }
 
@@ -817,6 +984,9 @@ public final class AllcraftAiJobs {
         private long resultRevision = -1L;
         private String candidateCommit;
         private String diagnostics = "";
+        private String suiteRunId;
+        private String suitePhase;
+        private String suiteCaseId;
         private String createdAt;
         private String updatedAt;
 
@@ -854,6 +1024,9 @@ public final class AllcraftAiJobs {
             result.addProperty("resultRevision", this.resultRevision);
             add(result, "candidateCommit", this.candidateCommit);
             result.addProperty("diagnostics", this.diagnostics);
+            add(result, "suiteRunId", this.suiteRunId);
+            add(result, "suitePhase", this.suitePhase);
+            add(result, "suiteCaseId", this.suiteCaseId);
             result.addProperty("createdAt", this.createdAt);
             result.addProperty("updatedAt", this.updatedAt);
             return result;
@@ -884,6 +1057,9 @@ public final class AllcraftAiJobs {
             job.resultRevision = number(object, "resultRevision", -1L);
             job.candidateCommit = optional(object, "candidateCommit");
             job.diagnostics = optional(object, "diagnostics", "");
+            job.suiteRunId = optional(object, "suiteRunId");
+            job.suitePhase = optional(object, "suitePhase");
+            job.suiteCaseId = optional(object, "suiteCaseId");
             job.createdAt = optional(object, "createdAt", job.createdAt);
             job.updatedAt = optional(object, "updatedAt", job.createdAt);
             return job;
@@ -915,6 +1091,34 @@ public final class AllcraftAiJobs {
     }
 
     private record Pending(Action action, CompletableFuture<Result> future, long generation) {
+    }
+
+    record BatchRequest(String caseId, String request) {
+    }
+
+    record BatchJob(String caseId, String jobId, long sequence) {
+    }
+
+    record BatchResult(long baseRevision, List<BatchJob> jobs) {
+    }
+
+    record JobSnapshot(
+        String jobId,
+        String caseId,
+        String state,
+        int attempt,
+        long resultRevision,
+        boolean cleanupComplete,
+        long sequence,
+        String diagnostics
+    ) {
+        boolean finalized() {
+            return state.equals(State.FINALIZED.id);
+        }
+
+        boolean terminalFailure() {
+            return state.equals(State.CANCELLED.id);
+        }
     }
 
     @FunctionalInterface
@@ -991,6 +1195,15 @@ public final class AllcraftAiJobs {
             Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (AtomicMoveNotSupportedException e) {
             Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private static void deleteTree(Path root) throws IOException {
+        if (!Files.exists(root)) return;
+        try (var paths = Files.walk(root)) {
+            for (Path path : paths.sorted((left, right) -> right.getNameCount() - left.getNameCount()).toList()) {
+                Files.deleteIfExists(path);
+            }
         }
     }
 

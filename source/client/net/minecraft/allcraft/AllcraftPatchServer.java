@@ -43,7 +43,10 @@ import org.slf4j.Logger;
 
 public final class AllcraftPatchServer {
     private static final List<String> NETWORK_TEST_NAMES = List.of("basic", "ordering", "payload", "cache", "timing");
-    public static final List<String> TEST_NAMES = Stream.concat(NETWORK_TEST_NAMES.stream(), AllcraftPatchCompiler.PATCH_TEST_NAMES.stream()).toList();
+    public static final List<String> TEST_NAMES = Stream.concat(
+        Stream.concat(NETWORK_TEST_NAMES.stream(), AllcraftPatchCompiler.PATCH_TEST_NAMES.stream()),
+        AllcraftAiTestSuites.TEST_NAMES.stream()
+    ).toList();
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Gson COMPACT_GSON = new Gson();
@@ -64,6 +67,7 @@ public final class AllcraftPatchServer {
     }
 
     public static int startTest(CommandSourceStack source, String testName) {
+        if (AllcraftAiTestSuites.TEST_NAMES.contains(testName)) return AllcraftAiTestSuites.start(source, testName);
         MinecraftServer server = source.getServer();
         if (!TEST_NAMES.contains(testName)) {
             source.sendFailure(Component.literal("Unknown Allcraft test '" + testName + "'. Expected: " + String.join(", ", TEST_NAMES)));
