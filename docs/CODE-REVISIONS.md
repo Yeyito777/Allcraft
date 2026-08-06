@@ -22,7 +22,7 @@ source/
 └── allcraft-revision.json     # optional lifecycle hooks
 ```
 
-Every revision is compared with `patches/revisions/current-source.json`. Added, changed, moved, and deleted files are discovered by path and SHA-256. Java reverse dependencies are conservatively recompiled; outputs are cached by side, compiler, source closure, and classpath identity.
+Every revision is compared with `patches/revisions/current-source.json`. Added, changed, moved, and deleted files are discovered by path and SHA-256. Java reverse dependencies are conservatively recompiled for compatibility validation; only explicitly changed source definitions are published at runtime. This prevents unchanged decompiled vanilla sources from regenerating incompatible synthetic lambda helpers. Outputs are cached by side, compiler, source closure, and classpath identity.
 
 Registry- and network-facing logical registration belongs in `shared/`. The builder verifies that every shared class compiles byte-identically on both sides, embeds a hashed shared-class contract, and rejects side-only registry mutation. Screens, renderers, particle providers, keybindings, and other genuinely side-only integrations remain under `client/` or `server/`.
 
@@ -69,7 +69,7 @@ public static void allcraftCommit(AllcraftRuntime.MigrationContext context) thro
 public static void allcraftRollback(AllcraftRuntime.MigrationContext context) throws Exception;
 ```
 
-No-argument forms are also accepted. Hook sources are automatically included in every artifact that references them, even when their source text did not change.
+No-argument forms are also accepted. Hook sources are automatically included in compilation validation. A changed hook definition is emitted; an unchanged hook is resolved from the selected parent revision.
 
 Every declared hook/entrypoint class must exist in the selected source revision or the installed base. The builder and runtime both enforce this, so a class left resident in the JVM by an aborted transaction cannot become an undeclared dependency of a later revision or break fresh-process replay.
 

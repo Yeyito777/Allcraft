@@ -325,12 +325,18 @@ public final class AllcraftRevisionBuilder {
         Compilation compilation = closure.isEmpty()
             ? Compilation.empty()
             : compile(side, sourceRoot, patchesRoot, worldManifest, closure);
-        Map<String, byte[]> classes = new LinkedHashMap<>(compilation.classes);
+        // The closure is a compile-time validation boundary, not a publication boundary. Emitting
+        // every unchanged reverse dependency is both unnecessary and unsafe for decompiled vanilla
+        // sources: javac may regenerate synthetic lambda helpers differently even though that source
+        // did not change, invalidating already-linked hidden lambda classes. If a source must change
+        // for binary compatibility, closure compilation rejects the revision until the agent edits
+        // that source explicitly; only explicitly changed sources become runtime definitions.
+        Map<String, byte[]> classes = classesForSources(changedJava, compilation.classes);
 
         Set<String> previousClasses = classSet(previous, side);
         Set<String> prospectiveClasses = new LinkedHashSet<>(classSet(current, side));
         // Changed files get their exact javac output below; remove their stale inner classes first.
-        for (String source : closure) {
+        for (String source : changedJava) {
             FileState old = previous.files.get(source);
             if (old != null) {
                 prospectiveClasses.removeAll(old.classNames);
@@ -1098,6 +1104,18 @@ public final class AllcraftRevisionBuilder {
             .map(AllcraftRevisionBuilder::className)
             .sorted()
             .toList();
+    }
+
+    private static Map<String, byte[]> classesForSources(Set<String> sources, Map<String, byte[]> compiled) {
+        Map<String, byte[]> result = new LinkedHashMap<>();
+        for (String source : sources) {
+            for (String className : classesForSource(source, compiled)) {
+                String entry = classEntry(className);
+                byte[] bytes = compiled.get(entry);
+                if (bytes != null) result.put(entry, bytes);
+            }
+        }
+        return result;
     }
 
     private static String sourceClassName(String path, FileState state) {

@@ -104,6 +104,10 @@ public final class CodeGeneralityRegression {
             "reverse dependency closure did not recompile an unchanged dependent source"
         );
         require(
+            !jarContains(revisionTwo.clientArtifactPath(), "allcraft/generality/ProbeConsumer.class"),
+            "unchanged closure source was incorrectly published as a runtime definition"
+        );
+        require(
             revisionTwo.movedFiles().contains(
                 "client/assets/allcraft/allcraft-test/one.txt -> client/assets/allcraft/allcraft-test/two.txt"
             ),
