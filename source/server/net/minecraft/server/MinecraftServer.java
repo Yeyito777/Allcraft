@@ -762,24 +762,31 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
 
             this.nextTickTimeNanos += thisTickNanos;
 
-            try (Profiler.Scope ignored = Profiler.use(this.createProfiler())) {
-               this.processPacketsAndTick(sprinting);
-               ProfilerFiller profiler = Profiler.get();
-               profiler.push("nextTickWait");
-               this.mayHaveDelayedTasks = true;
-               this.delayedTasksMaxNextTickTimeNanos = Math.max(Util.getNanos() + thisTickNanos, this.nextTickTimeNanos);
-               this.startMeasuringTaskExecutionTime();
-               this.waitUntilNextTick();
-               this.finishMeasuringTaskExecutionTime();
-               if (sprinting) {
-                  this.tickRateManager.endTickWork();
-               }
+                try {
+                    try (Profiler.Scope ignored = Profiler.use(this.createProfiler())) {
+                        this.processPacketsAndTick(sprinting);
+                        ProfilerFiller profiler = Profiler.get();
+                        profiler.push("nextTickWait");
+                        this.mayHaveDelayedTasks = true;
+                        this.delayedTasksMaxNextTickTimeNanos = Math.max(Util.getNanos() + thisTickNanos, this.nextTickTimeNanos);
+                        this.startMeasuringTaskExecutionTime();
+                        this.waitUntilNextTick();
+                        this.finishMeasuringTaskExecutionTime();
+                        if (sprinting) {
+                            this.tickRateManager.endTickWork();
+                        }
 
-               profiler.pop();
-               this.logFullTickTime();
-            } finally {
-               this.endMetricsRecordingTick();
-            }
+                        profiler.pop();
+                        this.logFullTickTime();
+                    } finally {
+                        this.endMetricsRecordingTick();
+                    }
+                } catch (Throwable failure) {
+                    if (!AllcraftPatchServer.recoverActivationTickFailure(this, failure)) throw failure;
+                    this.nextTickTimeNanos = Util.getNanos();
+                    this.lastOverloadWarningNanos = this.nextTickTimeNanos;
+                    continue;
+                }
 
             this.isReady = true;
             JvmProfiler.INSTANCE.onServerTick(this.smoothedTickTimeMillis);

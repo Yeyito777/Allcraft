@@ -143,6 +143,32 @@ public final class AllcraftPatchServer {
             || ACTIVE_RESOURCE_RESTORES.containsKey(server);
     }
 
+    /**
+     * A newly published method can expose missing semantic migration only when the rest of the
+     * server tick resumes. Keep that exception inside the still-reversible publication barrier:
+     * roll the candidate back, let clients acknowledge rollback, and return diagnostics to the AI
+     * instead of terminating the integrated server.
+     */
+    public static boolean recoverActivationTickFailure(MinecraftServer server, Throwable failure) {
+        TestRun run = ACTIVE_TESTS.get(server);
+        if (run == null || run.patches.isEmpty()) return false;
+        Patch patch = run.current();
+        if (patch.authoritativeCommitted
+            || patch.serverTransaction == null
+            || !patch.serverTransaction.started()
+            || (run.phase != Phase.WAITING_FOR_APPLIED && run.phase != Phase.WAITING_FOR_COMMITTED)) return false;
+        String reason = "Post-activation server tick failed: " + failure.getClass().getSimpleName() + ": " + conciseMessage(failure);
+        LOGGER.error("Recovering Allcraft revision {} after a post-activation server tick failure", patch.revision, failure);
+        try {
+            abortRun(server, run, reason);
+            return true;
+        } catch (Throwable rollbackFailure) {
+            failure.addSuppressed(rollbackFailure);
+            LOGGER.error("Could not recover Allcraft revision {} after tick failure", patch.revision, rollbackFailure);
+            return false;
+        }
+    }
+
     public static boolean reserveRevision(MinecraftServer server, String runId) {
         if (isRevisionBusy(server)) return false;
         EXTERNAL_RESERVATIONS.put(server, runId);

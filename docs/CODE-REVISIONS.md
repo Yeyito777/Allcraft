@@ -88,7 +88,7 @@ Every declared hook/entrypoint class must exist in the selected source revision 
 9. Run `commit`; peers report `COMMITTED`.
 10. Persist the source snapshot and manifest, send `FINALIZE`, and seal the revision into the world-exit rollback chain.
 
-Any failure before finalization sends `ABORT`. Modified definitions are restored, new classes lose their registered/cache reachability but remain executable for existing references, rollback hooks receive their checkpoints, and client/server resource overlays return to the committed manifest.
+Any failure before finalization sends `ABORT`. Modified definitions are restored, new classes lose their registered/cache reachability but remain executable for existing references, rollback hooks receive their checkpoints, and client/server resource overlays return to the committed manifest. The publication remains on probation through the client/server acknowledgement barrier: an exception raised when the server resumes the newly patched tick is caught at that barrier, rolled back, and returned to the AI as repair diagnostics instead of crashing the world. This safely detects missing state migration; it does not pretend that arbitrary semantic migration is automatically inferable.
 
 ## Recovery and world switching
 
