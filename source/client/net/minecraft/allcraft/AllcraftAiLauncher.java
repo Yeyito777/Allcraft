@@ -17,6 +17,7 @@ public final class AllcraftAiLauncher {
     static final Path EXO_CLI = Path.of("/home/yeyito/Workspace/exocortex/external-tools/exo-cli/bin/exo");
     static final Path TOOL_MODULE_RELATIVE = Path.of(".allcraft/exocortex/minecraft-tools.ts");
     static final String MODEL = "openai/gpt-5.6-luna";
+    static final String EFFORT = "max";
     private static final Pattern CONVERSATION_ID = Pattern.compile("[0-9]+-[a-z0-9]{6}");
 
     private AllcraftAiLauncher() {
@@ -45,6 +46,8 @@ public final class AllcraftAiLauncher {
             "send",
             "--model",
             MODEL,
+            "--effort",
+            EFFORT,
             "--custom-tool",
             toolModule.toString(),
             "--internal-tool",
@@ -120,7 +123,7 @@ public final class AllcraftAiLauncher {
     static CliResult continueCli(Path executable, Path sourceRoot, String conversationId, String request, Duration timeout)
         throws IOException, InterruptedException {
         return runIdCommand(
-            List.of(executable.toString(), "send", "--conv", conversationId, "--detach", "--id"),
+            List.of(executable.toString(), "send", "--conv", conversationId, "--effort", EFFORT, "--detach", "--id"),
             sourceRoot,
             request,
             timeout
