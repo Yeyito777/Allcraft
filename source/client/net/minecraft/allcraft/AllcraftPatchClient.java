@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.jar.JarEntry;
@@ -34,6 +35,8 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket;
 import net.minecraft.network.protocol.common.custom.AllcraftPayloads;
 import net.minecraft.sounds.SoundEvents;
+import net.minecraft.world.item.CreativeModeTabs;
+import net.minecraft.world.item.ItemStack;
 import org.slf4j.Logger;
 
 public final class AllcraftPatchClient {
@@ -243,6 +246,7 @@ public final class AllcraftPatchClient {
 
                     try {
                         applyTestArtifact(minecraft, artifact, payload);
+                        validateInteractiveCaches(minecraft, connection);
                         ACTIVE.put(
                             key,
                             new ActivePatch(artifact, activation.runtime, activation.resourcesBefore, runtimeResult, resourceResult)
@@ -295,6 +299,11 @@ public final class AllcraftPatchClient {
             if (restoreFailure != null) {
                 failure.addSuppressed(restoreFailure);
             }
+            try {
+                validateInteractiveCaches(minecraft, connection);
+            } catch (Throwable cacheFailure) {
+                failure.addSuppressed(cacheFailure);
+            }
             LOGGER.error("{} for Allcraft patch {}", display, payload.patchId(), failure);
             sendAck(connection, payload, AllcraftPayloads.AckStatus.FAILED, conciseMessage(failure));
             minecraft.showDebugChat(Component.literal("[Allcraft] " + display + ": " + conciseMessage(failure)).withStyle(ChatFormatting.RED));
@@ -336,6 +345,11 @@ public final class AllcraftPatchClient {
         }
         minecraft.allcraftRestoreResourceState(active.resourcesBefore).whenCompleteAsync((unused, restoreFailure) -> {
             if (restoreFailure != null) failure.addSuppressed(restoreFailure);
+            try {
+                validateInteractiveCaches(minecraft, connection);
+            } catch (Throwable cacheFailure) {
+                failure.addSuppressed(cacheFailure);
+            }
             LOGGER.error("Recovering Allcraft patch {} after a post-activation client tick failure", key.patchId(), failure);
             sendAck(connection, key, hash, AllcraftPayloads.AckStatus.FAILED, "Post-activation client tick failed: " + conciseMessage(failure));
             minecraft.showDebugChat(
@@ -365,12 +379,31 @@ public final class AllcraftPatchClient {
             LOGGER.error("Failed to roll back Allcraft classes for {}", payload.patchId(), e);
         }
         minecraft.allcraftRestoreResourceState(rollback.resourcesBefore).whenCompleteAsync((unused, failure) -> {
+            try {
+                validateInteractiveCaches(minecraft, connection);
+            } catch (Throwable cacheFailure) {
+                if (failure == null) failure = cacheFailure;
+                else failure.addSuppressed(cacheFailure);
+            }
             if (failure != null) {
                 sendAck(connection, payload, AllcraftPayloads.AckStatus.FAILED, "rollback failed: " + conciseMessage(failure));
             } else {
                 sendAck(connection, payload, AllcraftPayloads.AckStatus.ROLLED_BACK, "published transaction rolled back");
             }
         }, minecraft);
+    }
+
+    /** Forces known lazily-built client consumers while the revision is still reversible. */
+    private static void validateInteractiveCaches(Minecraft minecraft, ClientPacketListener connection) {
+        if (minecraft.player == null || minecraft.level == null) return;
+        boolean permissions = minecraft.player.canUseGameMasterBlocks() && minecraft.options.operatorItemsTab().get();
+        // Toggling the permission parameter forces both paths even when vanilla's cache key would
+        // otherwise consider the current registry/provider state unchanged after class evolution.
+        CreativeModeTabs.tryRebuildTabContents(connection.enabledFeatures(), !permissions, minecraft.level.registryAccess());
+        CreativeModeTabs.tryRebuildTabContents(connection.enabledFeatures(), permissions, minecraft.level.registryAccess());
+        List<ItemStack> searchItems = List.copyOf(CreativeModeTabs.searchTab().getDisplayItems());
+        connection.searchTrees().updateCreativeTooltips(minecraft.level.registryAccess(), searchItems);
+        connection.searchTrees().updateCreativeTags(searchItems);
     }
 
     private static Path cacheArtifact(PatchKey key, String testName, int step, int totalSteps, String hash, byte[] artifact) throws IOException {

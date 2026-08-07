@@ -86,7 +86,7 @@ Every declared hook/entrypoint class must exist in the selected source revision 
 5. Run `prepare` against the old game revision.
 6. Atomically redefine loaded classes and activate genuine additions at the scheduled tick; packet processing continues while gameplay is paused at the publication barrier.
 7. Run `migrate`, legacy activation entrypoints, the server-assigned registry plan, and resource/data publication.
-8. Peers report `APPLIED` with a complete registry-ID fingerprint; any disagreement aborts publication.
+8. Rebuild and validate known lazy client consumers such as Creative inventory tabs/search while definitions remain reversible. Peers then report `APPLIED` with a complete registry-ID fingerprint; any validation failure or disagreement aborts publication.
 9. Run `commit`; peers report `COMMITTED` while all transactions remain reversible.
 10. Resume one complete gameplay tick as a probation tick on both the server and every client. An immediate state-migration or linkage failure is caught before the process crash boundary, rolls every peer back, and becomes AI repair feedback.
 11. Persist the source snapshot and manifest, send `FINALIZE`, and seal the revision into the world-exit rollback chain.
