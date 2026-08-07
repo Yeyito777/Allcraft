@@ -51,7 +51,10 @@ public final class AllcraftAiBenchmarkRegression {
             run.phaseAState = "running";
             run.observed = new AllcraftAiTestSuites.Progress(12, 5, 1, 6, 19, 22L, 4);
             run.phaseATiming = new AllcraftAiTestSuites.PhaseTiming(5, 2_400L, 5_000L);
-            run.observedJobs.add(new AllcraftAiTestSuites.ObservedJob("case-0", id(0), "finalized", 2, 18L, true, ""));
+            run.observedJobs.add(new AllcraftAiTestSuites.ObservedJob(
+                "case-0", id(0), "finalized", 2, 18L, true, "",
+                "2026-08-07T00:00:00Z", "2026-08-07T00:00:05Z", 5_000L
+            ));
             AllcraftAiTestSuites.persist(world, run);
 
             AllcraftAiTestSuites.SuiteRun restored = AllcraftAiTestSuites.loadCurrent(world);

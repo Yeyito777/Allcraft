@@ -306,7 +306,8 @@ public final class AllcraftAiTestSuites {
         run.observedJobs.clear();
         for (AllcraftAiJobs.JobSnapshot job : jobs) {
             run.observedJobs.add(new ObservedJob(
-                job.caseId(), job.jobId(), job.state(), job.attempt(), job.resultRevision(), job.cleanupComplete(), job.diagnostics()
+                job.caseId(), job.jobId(), job.state(), job.attempt(), job.resultRevision(), job.cleanupComplete(), job.diagnostics(),
+                job.createdAt(), job.finalizedAt(), completionMillis(job)
             ));
         }
         run.observed = new Progress(
@@ -338,11 +339,8 @@ public final class AllcraftAiTestSuites {
         long totalMillis = 0L;
         long maxMillis = 0L;
         for (AllcraftAiJobs.JobSnapshot job : jobs) {
-            if (!job.finalized() || job.createdAt() == null || job.finalizedAt() == null) continue;
-            long elapsed = Math.max(
-                0L,
-                Instant.parse(job.finalizedAt()).toEpochMilli() - Instant.parse(job.createdAt()).toEpochMilli()
-            );
+            long elapsed = completionMillis(job);
+            if (elapsed < 0L) continue;
             completed++;
             totalMillis = Math.addExact(totalMillis, elapsed);
             maxMillis = Math.max(maxMillis, elapsed);
@@ -350,6 +348,15 @@ public final class AllcraftAiTestSuites {
         return completed == 0
             ? PhaseTiming.empty()
             : new PhaseTiming(completed, totalMillis / completed, maxMillis);
+    }
+
+    private static long completionMillis(AllcraftAiJobs.JobSnapshot job) {
+        if (!job.finalized() || job.createdAt() == null || job.finalizedAt() == null) return -1L;
+        return elapsedMillis(job.createdAt(), job.finalizedAt());
+    }
+
+    private static long elapsedMillis(String createdAt, String finalizedAt) {
+        return Math.max(0L, Instant.parse(finalizedAt).toEpochMilli() - Instant.parse(createdAt).toEpochMilli());
     }
 
     private static void report(CommandSourceStack source, SuiteRun run, String prefix) {
@@ -588,7 +595,10 @@ public final class AllcraftAiTestSuites {
         int attempt,
         long resultRevision,
         boolean cleanupComplete,
-        String diagnostics
+        String diagnostics,
+        String createdAt,
+        String finalizedAt,
+        long completionMillis
     ) {
         JsonObject toJson() {
             JsonObject result = new JsonObject();
@@ -599,10 +609,18 @@ public final class AllcraftAiTestSuites {
             result.addProperty("resultRevision", this.resultRevision);
             result.addProperty("cleanupComplete", this.cleanupComplete);
             result.addProperty("diagnostics", this.diagnostics == null ? "" : this.diagnostics);
+            if (this.createdAt != null) result.addProperty("createdAt", this.createdAt);
+            if (this.finalizedAt != null) result.addProperty("finalizedAt", this.finalizedAt);
+            if (this.completionMillis >= 0L) result.addProperty("completionMillis", this.completionMillis);
             return result;
         }
 
         static ObservedJob fromJson(JsonObject object) {
+            String createdAt = object.has("createdAt") ? object.get("createdAt").getAsString() : null;
+            String finalizedAt = object.has("finalizedAt") ? object.get("finalizedAt").getAsString() : null;
+            long completionMillis = object.has("completionMillis")
+                ? object.get("completionMillis").getAsLong()
+                : createdAt != null && finalizedAt != null ? elapsedMillis(createdAt, finalizedAt) : -1L;
             return new ObservedJob(
                 object.get("case").getAsString(),
                 object.get("jobId").getAsString(),
@@ -610,7 +628,10 @@ public final class AllcraftAiTestSuites {
                 object.get("attempt").getAsInt(),
                 object.get("resultRevision").getAsLong(),
                 object.get("cleanupComplete").getAsBoolean(),
-                object.get("diagnostics").getAsString()
+                object.get("diagnostics").getAsString(),
+                createdAt,
+                finalizedAt,
+                completionMillis
             );
         }
     }

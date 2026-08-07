@@ -43,7 +43,7 @@ Running `suite-1-a` again does not duplicate work. It prints current progress in
 saves/<world>/patches/ai/suites/suite-1/current.json
 ```
 
-Each case still has its ordinary job record under `patches/ai/jobs/<job-id>/job.json`. The suite manifest records case/job identity, state, attempts, final revision, diagnostics, and cleanup completion. It also records `phaseATiming` and `phaseBTiming`, each containing the completed-task count plus average and maximum completion time in milliseconds. Completion time runs from job creation through successful distributed finalization, so it includes editor queueing, repair attempts, sequential integration, and activation but excludes asynchronous cleanup.
+Each case still has its ordinary job record under `patches/ai/jobs/<job-id>/job.json`. The suite manifest records case/job identity, state, attempts, final revision, diagnostics, and cleanup completion. Every entry in `caseResults` also records its `createdAt`, `finalizedAt`, and individual `completionMillis`. `phaseATiming` and `phaseBTiming` contain the completed-task count plus average and maximum completion time in milliseconds. Completion time runs from job creation through successful distributed finalization, so it includes editor queueing, repair attempts, sequential integration, and activation but excludes asynchronous cleanup.
 
 ## Phase A manual checks
 
