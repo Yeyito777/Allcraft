@@ -310,6 +310,9 @@ public final class AllcraftRuntime {
                 instrumentation.redefineClasses(earlyDefinitions.toArray(ClassDefinition[]::new));
                 redefineMillis += elapsedMillis(redefineStart);
                 CURRENT_DEFINITIONS.putAll(earlyChanged);
+                for (ClassDefinition definition : earlyDefinitions) {
+                    transaction.publishedClasses.add(definition.getDefinitionClass().getName());
+                }
                 transaction.published = true;
             }
             AllcraftRegistries.run(
@@ -389,6 +392,9 @@ public final class AllcraftRuntime {
                 instrumentation.redefineClasses(definitions.toArray(ClassDefinition[]::new));
                 redefineMillis += elapsedMillis(redefineStart);
                 CURRENT_DEFINITIONS.putAll(changed);
+                for (ClassDefinition definition : definitions) {
+                    transaction.publishedClasses.add(definition.getDefinitionClass().getName());
+                }
             }
             transaction.published = true;
             AllcraftRegistries.run(
@@ -489,6 +495,7 @@ public final class AllcraftRuntime {
         List<ClassDefinition> definitions = new ArrayList<>();
         Map<Class<?>, byte[]> restored = new IdentityHashMap<>();
         for (Map.Entry<String, byte[]> entry : transaction.publishedPrevious.entrySet()) {
+            if (!transaction.publishedClasses.contains(entry.getKey())) continue;
             Class<?> type = loaded.get(entry.getKey());
             if (type != null) {
                 definitions.add(new ClassDefinition(type, entry.getValue()));
@@ -852,6 +859,7 @@ public final class AllcraftRuntime {
         private final List<String> entrypoints;
         private final Map<String, byte[]> stagedPrevious;
         private final Map<String, byte[]> publishedPrevious = new LinkedHashMap<>();
+        private final Set<String> publishedClasses = new LinkedHashSet<>();
         private final Set<String> introducedClasses = new LinkedHashSet<>();
         private final MigrationContext context;
         private final AllcraftRegistries.Transaction registryTransaction;

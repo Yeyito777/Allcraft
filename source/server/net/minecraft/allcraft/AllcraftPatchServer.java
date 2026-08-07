@@ -508,7 +508,7 @@ public final class AllcraftPatchServer {
                             if (patch.serverTransaction != null && patch.serverTransaction.started()) {
                                 patch.serverTransaction.rollback();
                             }
-                        } catch (Exception e) {
+                        } catch (Exception | LinkageError | InternalError e) {
                             LOGGER.error("Failed to roll back server classes for {}", patch.patchId, e);
                             run.failureReason = (run.failureReason == null ? "transaction rollback failed" : run.failureReason)
                                 + "; server class rollback failed: "
@@ -539,7 +539,7 @@ public final class AllcraftPatchServer {
                     }
                 }
             }
-        } catch (Exception e) {
+        } catch (Exception | LinkageError | InternalError e) {
             if (run.current().authoritativeCommitted) {
                 LOGGER.error("Committed Allcraft revision {} encountered a post-commit error", run.current().revision, e);
                 finishTest(server, run);
