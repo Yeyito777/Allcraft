@@ -43,7 +43,7 @@ Running `suite-1-a` again does not duplicate work. It prints current progress in
 saves/<world>/patches/ai/suites/suite-1/current.json
 ```
 
-Each case still has its ordinary job record under `patches/ai/jobs/<job-id>/job.json`. The suite manifest records case/job identity, state, attempts, final revision, diagnostics, and cleanup completion.
+Each case still has its ordinary job record under `patches/ai/jobs/<job-id>/job.json`. The suite manifest records case/job identity, state, attempts, final revision, diagnostics, and cleanup completion. It also records `phaseATiming` and `phaseBTiming`, each containing the completed-task count plus average and maximum completion time in milliseconds. Completion time runs from job creation through successful distributed finalization, so it includes editor queueing, repair attempts, sequential integration, and activation but excludes asynchronous cleanup.
 
 ## Phase A manual checks
 
@@ -110,6 +110,7 @@ After all 16 jobs finalize:
 - Phase B preserves live table state, migrates all removed-disc stacks, and retains both conflicting double-jump changes.
 - Save/reopen, F3+T, and a fresh-client cumulative join retain the final game.
 - The suite manifest reports 16 finalized cases and eventual cleanup for all 16.
+- Phase A and Phase B each report average and maximum end-to-end task completion time.
 
 ## Deterministic regression
 

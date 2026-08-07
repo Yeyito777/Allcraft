@@ -317,6 +317,7 @@ public final class AllcraftAiTestSuites {
             List<AllcraftAiJobs.JobSnapshot> phase = AllcraftAiJobs.jobSnapshots(
                 root, run.phaseAJobs.stream().map(JobReference::jobId).toList()
             );
+            run.phaseATiming = phaseTiming(phase);
             run.phaseAState = phase.stream().allMatch(AllcraftAiJobs.JobSnapshot::finalized)
                 ? "finalized"
                 : phase.stream().anyMatch(AllcraftAiJobs.JobSnapshot::terminalFailure) ? "failed" : "running";
@@ -325,10 +326,30 @@ public final class AllcraftAiTestSuites {
             List<AllcraftAiJobs.JobSnapshot> phase = AllcraftAiJobs.jobSnapshots(
                 root, run.phaseBJobs.stream().map(JobReference::jobId).toList()
             );
+            run.phaseBTiming = phaseTiming(phase);
             run.phaseBState = phase.stream().allMatch(AllcraftAiJobs.JobSnapshot::finalized)
                 ? "finalized"
                 : phase.stream().anyMatch(AllcraftAiJobs.JobSnapshot::terminalFailure) ? "failed" : "running";
         }
+    }
+
+    static PhaseTiming phaseTiming(List<AllcraftAiJobs.JobSnapshot> jobs) {
+        int completed = 0;
+        long totalMillis = 0L;
+        long maxMillis = 0L;
+        for (AllcraftAiJobs.JobSnapshot job : jobs) {
+            if (!job.finalized() || job.createdAt() == null || job.finalizedAt() == null) continue;
+            long elapsed = Math.max(
+                0L,
+                Instant.parse(job.finalizedAt()).toEpochMilli() - Instant.parse(job.createdAt()).toEpochMilli()
+            );
+            completed++;
+            totalMillis = Math.addExact(totalMillis, elapsed);
+            maxMillis = Math.max(maxMillis, elapsed);
+        }
+        return completed == 0
+            ? PhaseTiming.empty()
+            : new PhaseTiming(completed, totalMillis / completed, maxMillis);
     }
 
     private static void report(CommandSourceStack source, SuiteRun run, String prefix) {
@@ -338,9 +359,25 @@ public final class AllcraftAiTestSuites {
                 prefix + ": run=" + shortId(run.runId) + " A=" + run.phaseAState + " B=" + run.phaseBState
                     + " finalized=" + value.finalized + "/" + value.total + " failed=" + value.failed
                     + " attempts=" + value.attempts + " highestRevision=" + value.highestRevision
+                    + " A-time=" + formatTiming(run.phaseATiming) + " B-time=" + formatTiming(run.phaseBTiming)
             ),
             false
         );
+    }
+
+    private static String formatTiming(PhaseTiming timing) {
+        if (timing.completedTasks == 0) return "n/a";
+        return "avg " + formatDuration(timing.averageCompletionMillis) + ", max " + formatDuration(timing.maxCompletionMillis);
+    }
+
+    private static String formatDuration(long millis) {
+        long seconds = (millis + 500L) / 1_000L;
+        long hours = seconds / 3_600L;
+        long minutes = seconds % 3_600L / 60L;
+        long remainder = seconds % 60L;
+        if (hours > 0L) return hours + "h" + minutes + "m" + remainder + "s";
+        if (minutes > 0L) return minutes + "m" + remainder + "s";
+        return remainder + "s";
     }
 
     private static void reportJobs(CommandSourceStack source, List<JobReference> jobs) {
@@ -450,6 +487,8 @@ public final class AllcraftAiTestSuites {
         final List<JobReference> phaseBJobs = new ArrayList<>();
         final List<ObservedJob> observedJobs = new ArrayList<>();
         Progress observed = Progress.empty();
+        PhaseTiming phaseATiming = PhaseTiming.empty();
+        PhaseTiming phaseBTiming = PhaseTiming.empty();
 
         SuiteRun(String runId, long baseRevision, String createdAt) {
             this.runId = runId;
@@ -473,6 +512,8 @@ public final class AllcraftAiTestSuites {
             result.add("phaseAJobs", jobsToJson(this.phaseAJobs));
             result.add("phaseBJobs", jobsToJson(this.phaseBJobs));
             result.add("observed", this.observed.toJson());
+            result.add("phaseATiming", this.phaseATiming.toJson());
+            result.add("phaseBTiming", this.phaseBTiming.toJson());
             JsonArray caseResults = new JsonArray();
             for (ObservedJob job : this.observedJobs) caseResults.add(job.toJson());
             result.add("caseResults", caseResults);
@@ -496,6 +537,8 @@ public final class AllcraftAiTestSuites {
             readJobs(object.getAsJsonArray("phaseAJobs"), run.phaseAJobs);
             readJobs(object.getAsJsonArray("phaseBJobs"), run.phaseBJobs);
             if (object.has("observed")) run.observed = Progress.fromJson(object.getAsJsonObject("observed"));
+            if (object.has("phaseATiming")) run.phaseATiming = PhaseTiming.fromJson(object.getAsJsonObject("phaseATiming"));
+            if (object.has("phaseBTiming")) run.phaseBTiming = PhaseTiming.fromJson(object.getAsJsonObject("phaseBTiming"));
             if (object.has("caseResults")) {
                 for (var element : object.getAsJsonArray("caseResults")) {
                     run.observedJobs.add(ObservedJob.fromJson(element.getAsJsonObject()));
@@ -598,6 +641,28 @@ public final class AllcraftAiTestSuites {
                 object.get("attempts").getAsInt(),
                 object.get("highestRevision").getAsLong(),
                 object.get("cleaned").getAsInt()
+            );
+        }
+    }
+
+    record PhaseTiming(int completedTasks, long averageCompletionMillis, long maxCompletionMillis) {
+        static PhaseTiming empty() {
+            return new PhaseTiming(0, 0L, 0L);
+        }
+
+        JsonObject toJson() {
+            JsonObject result = new JsonObject();
+            result.addProperty("completedTasks", this.completedTasks);
+            result.addProperty("averageCompletionMillis", this.averageCompletionMillis);
+            result.addProperty("maxCompletionMillis", this.maxCompletionMillis);
+            return result;
+        }
+
+        static PhaseTiming fromJson(JsonObject object) {
+            return new PhaseTiming(
+                object.get("completedTasks").getAsInt(),
+                object.get("averageCompletionMillis").getAsLong(),
+                object.get("maxCompletionMillis").getAsLong()
             );
         }
     }

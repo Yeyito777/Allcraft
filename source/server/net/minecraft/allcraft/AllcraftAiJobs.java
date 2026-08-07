@@ -215,7 +215,9 @@ public final class AllcraftAiJobs {
             job.resultRevision,
             job.cleanupComplete,
             job.sequence,
-            job.diagnostics
+            job.diagnostics,
+            job.createdAt,
+            job.finalizedAt
         );
     }
 
@@ -873,7 +875,9 @@ public final class AllcraftAiJobs {
             this.job.state = State.FINALIZED;
             this.job.resultRevision = revision;
             this.job.diagnostics = "";
-            this.job.updatedAt = Instant.now().toString();
+            String now = Instant.now().toString();
+            if (this.job.finalizedAt == null) this.job.finalizedAt = now;
+            this.job.updatedAt = now;
             save();
             announceCurrent("[Allcraft AI " + shortId(this.job.id) + "] finalized as world revision " + revision, ChatFormatting.GREEN);
             this.world.scheduleCleanup(this.job, false);
@@ -989,6 +993,7 @@ public final class AllcraftAiJobs {
         private String suiteCaseId;
         private String createdAt;
         private String updatedAt;
+        private String finalizedAt;
 
         private Job(String id, String request, long sequence, long baseRevision) {
             this.id = id;
@@ -1029,6 +1034,7 @@ public final class AllcraftAiJobs {
             add(result, "suiteCaseId", this.suiteCaseId);
             result.addProperty("createdAt", this.createdAt);
             result.addProperty("updatedAt", this.updatedAt);
+            add(result, "finalizedAt", this.finalizedAt);
             return result;
         }
 
@@ -1062,6 +1068,8 @@ public final class AllcraftAiJobs {
             job.suiteCaseId = optional(object, "suiteCaseId");
             job.createdAt = optional(object, "createdAt", job.createdAt);
             job.updatedAt = optional(object, "updatedAt", job.createdAt);
+            job.finalizedAt = optional(object, "finalizedAt");
+            if (job.finalizedAt == null && job.state == State.FINALIZED) job.finalizedAt = job.updatedAt;
             return job;
         }
     }
@@ -1110,7 +1118,9 @@ public final class AllcraftAiJobs {
         long resultRevision,
         boolean cleanupComplete,
         long sequence,
-        String diagnostics
+        String diagnostics,
+        String createdAt,
+        String finalizedAt
     ) {
         boolean finalized() {
             return state.equals(State.FINALIZED.id);

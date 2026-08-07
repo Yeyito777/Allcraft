@@ -15,6 +15,7 @@ public final class AllcraftAiBenchmarkRegression {
     public static void main(String[] args) throws Exception {
         testDefinitionsAndRouting();
         testPersistentManifestAndGating();
+        testCompletionTiming();
         testAtomicOrderedBatchesAndCapacity();
         testInterruptedBatchRecovery();
         System.out.println("Allcraft AI benchmark regression passed");
@@ -49,6 +50,7 @@ public final class AllcraftAiBenchmarkRegression {
             }
             run.phaseAState = "running";
             run.observed = new AllcraftAiTestSuites.Progress(12, 5, 1, 6, 19, 22L, 4);
+            run.phaseATiming = new AllcraftAiTestSuites.PhaseTiming(5, 2_400L, 5_000L);
             run.observedJobs.add(new AllcraftAiTestSuites.ObservedJob("case-0", id(0), "finalized", 2, 18L, true, ""));
             AllcraftAiTestSuites.persist(world, run);
 
@@ -57,6 +59,8 @@ public final class AllcraftAiBenchmarkRegression {
             require(restored.baseRevision == 17L, "suite base revision persists");
             require(restored.phaseAJobs.equals(run.phaseAJobs), "phase job IDs persist");
             require(restored.observed.equals(run.observed), "aggregate progress persists");
+            require(restored.phaseATiming.equals(run.phaseATiming), "phase A completion timing persists");
+            require(restored.phaseBTiming.equals(AllcraftAiTestSuites.PhaseTiming.empty()), "empty phase B timing persists");
             require(restored.observedJobs.equals(run.observedJobs), "per-case results persist");
             require(
                 AllcraftAiTestSuites.phaseADecision(restored) == AllcraftAiTestSuites.PhaseADecision.ALREADY_LAUNCHED,
@@ -66,7 +70,8 @@ public final class AllcraftAiBenchmarkRegression {
             List<AllcraftAiJobs.JobSnapshot> finalized = new ArrayList<>();
             for (int index = 0; index < 12; index++) {
                 finalized.add(new AllcraftAiJobs.JobSnapshot(
-                    id(index), "case-" + index, "finalized", 1, 18L + index, true, index + 1L, ""
+                    id(index), "case-" + index, "finalized", 1, 18L + index, true, index + 1L, "",
+                    "2026-08-07T00:00:00Z", "2026-08-07T00:00:01Z"
                 ));
             }
             require(
@@ -79,7 +84,9 @@ public final class AllcraftAiBenchmarkRegression {
                 "second phase B invocation confirms preparation"
             );
             List<AllcraftAiJobs.JobSnapshot> incomplete = new ArrayList<>(finalized);
-            incomplete.set(0, new AllcraftAiJobs.JobSnapshot(id(0), "case-0", "editing", 1, -1L, false, 1L, ""));
+            incomplete.set(0, new AllcraftAiJobs.JobSnapshot(
+                id(0), "case-0", "editing", 1, -1L, false, 1L, "", "2026-08-07T00:00:00Z", null
+            ));
             require(
                 AllcraftAiTestSuites.phaseBDecision(restored, incomplete) == AllcraftAiTestSuites.PhaseBDecision.BLOCKED,
                 "phase B blocks until every phase A job finalizes"
@@ -92,6 +99,27 @@ public final class AllcraftAiBenchmarkRegression {
         } finally {
             deleteTree(world);
         }
+    }
+
+    private static void testCompletionTiming() {
+        List<AllcraftAiJobs.JobSnapshot> jobs = List.of(
+            new AllcraftAiJobs.JobSnapshot(
+                id(1), "fast", "finalized", 1, 1L, true, 1L, "",
+                "2026-08-07T00:00:00Z", "2026-08-07T00:00:02Z"
+            ),
+            new AllcraftAiJobs.JobSnapshot(
+                id(2), "slow", "finalized", 3, 2L, true, 2L, "",
+                "2026-08-07T00:00:00Z", "2026-08-07T00:00:06Z"
+            ),
+            new AllcraftAiJobs.JobSnapshot(
+                id(3), "active", "editing", 1, -1L, false, 3L, "",
+                "2026-08-07T00:00:00Z", null
+            )
+        );
+        AllcraftAiTestSuites.PhaseTiming timing = AllcraftAiTestSuites.phaseTiming(jobs);
+        require(timing.completedTasks() == 2, "only finalized tasks contribute to completion timing");
+        require(timing.averageCompletionMillis() == 4_000L, "average end-to-end task completion time");
+        require(timing.maxCompletionMillis() == 6_000L, "maximum end-to-end task completion time");
     }
 
     private static void testAtomicOrderedBatchesAndCapacity() throws Exception {
