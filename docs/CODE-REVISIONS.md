@@ -88,7 +88,7 @@ Every declared hook/entrypoint class must exist in the selected source revision 
 7. Run `migrate`, legacy activation entrypoints, the server-assigned registry plan, and resource/data publication.
 8. Peers report `APPLIED` with a complete registry-ID fingerprint; any disagreement aborts publication.
 9. Run `commit`; peers report `COMMITTED` while all transactions remain reversible.
-10. Resume one complete gameplay tick as a probation tick. An immediate state-migration or linkage failure rolls every peer back and becomes AI repair feedback.
+10. Resume one complete gameplay tick as a probation tick on both the server and every client. An immediate state-migration or linkage failure is caught before the process crash boundary, rolls every peer back, and becomes AI repair feedback.
 11. Persist the source snapshot and manifest, send `FINALIZE`, and seal the revision into the world-exit rollback chain.
 
 Any failure before finalization sends `ABORT`. Modified definitions are restored, new classes lose their registered/cache reachability but remain executable for existing references, rollback hooks receive their checkpoints, and client/server resource overlays return to the committed manifest. The publication remains on probation through the client/server acknowledgement barrier: an exception raised when the server resumes the newly patched tick is caught at that barrier, rolled back, and returned to the AI as repair diagnostics instead of crashing the world. This safely detects missing state migration; it does not pretend that arbitrary semantic migration is automatically inferable.

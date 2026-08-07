@@ -301,6 +301,50 @@ public final class AllcraftPatchClient {
         }, minecraft);
     }
 
+    /**
+     * Keeps failures exposed by the first live client tick inside the reversible activation
+     * barrier. This is the client counterpart to the integrated server's probation tick.
+     */
+    public static boolean recoverActivationTickFailure(Minecraft minecraft, Throwable failure) {
+        ClientPacketListener connection = minecraft.getConnection();
+        if (connection == null) return false;
+        Map.Entry<PatchKey, ActivePatch> entry = COMMITTED.entrySet().stream().findFirst().orElse(null);
+        if (entry == null) entry = ACTIVE.entrySet().stream().findFirst().orElse(null);
+        if (entry == null) return false;
+
+        PatchKey key = entry.getKey();
+        ActivePatch active = entry.getValue();
+        ACTIVE.remove(key);
+        COMMITTED.remove(key);
+        STAGED.remove(key);
+        SCHEDULED.remove(key);
+        try {
+            active.runtime.rollback();
+        } catch (Exception rollbackFailure) {
+            failure.addSuppressed(rollbackFailure);
+            LOGGER.error("Could not recover Allcraft patch {} after a client tick failure", key.patchId(), failure);
+            return false;
+        }
+
+        final String hash;
+        try {
+            hash = sha256(active.artifact);
+        } catch (IOException hashFailure) {
+            failure.addSuppressed(hashFailure);
+            LOGGER.error("Could not identify Allcraft patch {} after a client tick failure", key.patchId(), failure);
+            return false;
+        }
+        minecraft.allcraftRestoreResourceState(active.resourcesBefore).whenCompleteAsync((unused, restoreFailure) -> {
+            if (restoreFailure != null) failure.addSuppressed(restoreFailure);
+            LOGGER.error("Recovering Allcraft patch {} after a post-activation client tick failure", key.patchId(), failure);
+            sendAck(connection, key, hash, AllcraftPayloads.AckStatus.FAILED, "Post-activation client tick failed: " + conciseMessage(failure));
+            minecraft.showDebugChat(
+                Component.literal("[Allcraft] Client activation rolled back: " + conciseMessage(failure)).withStyle(ChatFormatting.RED)
+            );
+        }, minecraft);
+        return true;
+    }
+
     private static void abort(
         Minecraft minecraft, ClientPacketListener connection, PatchKey key, AllcraftPayloads.PatchControl payload
     ) {
@@ -547,6 +591,25 @@ public final class AllcraftPatchClient {
                     payload.revision(),
                     payload.sha256(),
                     AllcraftRegistries.fingerprint(connection.registryAccess(), payload.registryPlan()),
+                    message
+                )
+            )
+        );
+    }
+
+    private static void sendAck(
+        ClientPacketListener connection, PatchKey key, String hash, AllcraftPayloads.AckStatus status, String message
+    ) {
+        connection.send(
+            new ServerboundCustomPayloadPacket(
+                new AllcraftPayloads.PatchAck(
+                    status,
+                    key.serverId(),
+                    key.worldId(),
+                    key.patchId(),
+                    key.revision(),
+                    hash,
+                    AllcraftRegistries.fingerprint(connection.registryAccess()),
                     message
                 )
             )

@@ -1532,7 +1532,11 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements 
                 profiler.incrementCounter("clientTick");
 
                 try (Gizmos.TemporaryCollection ignored = this.collectPerTickGizmos()) {
-                    this.tick();
+                    try {
+                        this.tick();
+                    } catch (RuntimeException | Error failure) {
+                        if (!AllcraftPatchClient.recoverActivationTickFailure(this, failure)) throw failure;
+                    }
                 }
             }
 
