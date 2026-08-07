@@ -7,6 +7,13 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mojang.logging.LogUtils;
+import com.sun.source.tree.ClassTree;
+import com.sun.source.tree.CompilationUnitTree;
+import com.sun.source.tree.Tree;
+import com.sun.source.tree.VariableTree;
+import com.sun.source.util.JavacTask;
+import com.sun.source.util.SourcePositions;
+import com.sun.source.util.Trees;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
@@ -52,6 +59,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import java.util.zip.CRC32;
+import javax.lang.model.element.Modifier;
+import javax.tools.Diagnostic;
+import javax.tools.DiagnosticCollector;
+import javax.tools.JavaCompiler;
+import javax.tools.JavaFileObject;
+import javax.tools.SimpleJavaFileObject;
+import javax.tools.StandardJavaFileManager;
+import javax.tools.ToolProvider;
 import org.slf4j.Logger;
 
 /** Production source-revision differ, compiler, and client/server artifact builder. */
@@ -59,9 +74,10 @@ public final class AllcraftRevisionBuilder {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
     private static final int SNAPSHOT_FORMAT = 1;
-    private static final int ARTIFACT_FORMAT = 2;
-    private static final String CACHE_FORMAT = "allcraft-general-compiler-v2";
+    private static final int ARTIFACT_FORMAT = 3;
+    private static final String CACHE_FORMAT = "allcraft-general-compiler-v3-static-initializers";
     private static final String SNAPSHOT = "revisions/current-source.json";
+    private static final String STATIC_INITIALIZER_PREFIX = "allcraft$initializeAddedStatic$";
     private static final Pattern PACKAGE = Pattern.compile("(?m)^\\s*package\\s+([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\s*;");
     private static final Pattern WILDCARD_IMPORT = Pattern.compile(
         "(?m)^\\s*import\\s+(?:static\\s+)?([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\.\\*\\s*;"
@@ -393,6 +409,7 @@ public final class AllcraftRevisionBuilder {
             List.copyOf(closure.stream().sorted().toList()),
             hooks,
             entrypoints,
+            compilation.staticInitializers,
             compilation.cacheHit,
             compilation.elapsedMillis
         );
@@ -735,15 +752,16 @@ public final class AllcraftRevisionBuilder {
     ) throws IOException {
         long startedAt = System.nanoTime();
         List<Path> sourceFiles = sources.stream().map(sourceRoot::resolve).map(path -> path.toAbsolutePath().normalize()).sorted().toList();
+        StaticSourcePlan staticPlan = planAutomaticStaticInitializers(side, sourceRoot, sourceFiles, patchesRoot, manifest);
         String classPath = compileClassPath(side, patchesRoot, manifest);
-        String key = cacheKey(side, sourceFiles, classPath);
+        String key = cacheKey(side, sourceFiles, staticPlan.sources, classPath);
         Path cacheRoot = patchesRoot.resolve("build-cache/general").resolve(side.id);
         Path entry = cacheRoot.resolve(key);
         Path output = entry.resolve("classes");
         if (Files.isRegularFile(entry.resolve("complete"))) {
             Map<String, byte[]> cached = readClasses(output);
             if (!cached.isEmpty()) {
-                return new Compilation(cached, true, elapsedMillis(startedAt));
+                return new Compilation(cached, staticPlan.initializers, true, elapsedMillis(startedAt));
             }
         }
 
@@ -754,6 +772,18 @@ public final class AllcraftRevisionBuilder {
         Path compilerLog = temporary.resolve("javac.log");
         Files.createDirectories(temporaryOutput);
         Files.createDirectories(emptySourcePath);
+        List<Path> compilerSources = new ArrayList<>();
+        for (Path sourceFile : sourceFiles) {
+            String transformed = staticPlan.sources.get(sourceFile);
+            if (transformed == null) {
+                compilerSources.add(sourceFile);
+                continue;
+            }
+            Path generated = temporary.resolve("transformed-source").resolve(sourceRoot.relativize(sourceFile));
+            Files.createDirectories(generated.getParent());
+            Files.writeString(generated, transformed, StandardCharsets.UTF_8);
+            compilerSources.add(generated);
+        }
         List<String> command = new ArrayList<>();
         command.add(configuredJavac().toString());
         command.add("-J-Xms32m");
@@ -774,8 +804,13 @@ public final class AllcraftRevisionBuilder {
         command.add("-parameters");
         command.add("-proc:none");
         command.add("-implicit:none");
-        sourceFiles.forEach(path -> command.add(path.toString()));
-        LOGGER.info("Compiling Allcraft {} revision from {} explicit source file(s)", side.id, sourceFiles.size());
+        compilerSources.forEach(path -> command.add(path.toString()));
+        LOGGER.info(
+            "Compiling Allcraft {} revision from {} explicit source file(s), with {} automatic static initializer(s)",
+            side.id,
+            sourceFiles.size(),
+            staticPlan.initializers.size()
+        );
         Process process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(compilerLog.toFile()).start();
         boolean finished;
         try {
@@ -808,7 +843,159 @@ public final class AllcraftRevisionBuilder {
         } catch (AtomicMoveNotSupportedException e) {
             Files.move(temporary, entry);
         }
-        return new Compilation(classes, false, elapsedMillis(startedAt));
+        return new Compilation(classes, staticPlan.initializers, false, elapsedMillis(startedAt));
+    }
+
+    /**
+     * javac places every non-constant static field initializer in the class-wide {@code <clinit>}.
+     * Enhanced redefinition adds a field to an initialized class but intentionally does not replay
+     * that method. Preserve ordinary source semantics by compiling a private evaluator for each
+     * newly added initialized static field; the runtime evaluates it exactly once after redefine
+     * and writes the result into the new field, including {@code static final} fields.
+     */
+    private static StaticSourcePlan planAutomaticStaticInitializers(
+        Side side, Path sourceRoot, List<Path> sourceFiles, Path patchesRoot, JsonObject manifest
+    ) throws IOException {
+        Map<Path, String> transformed = new LinkedHashMap<>();
+        List<StaticInitializer> initializers = new ArrayList<>();
+        for (Path sourceFile : sourceFiles) {
+            String source = Files.readString(sourceFile, StandardCharsets.UTF_8);
+            SourceStaticPlan plan = planSourceStaticInitializers(side, sourceFile, source, patchesRoot, manifest);
+            if (!plan.initializers.isEmpty()) {
+                transformed.put(sourceFile, applyInsertions(source, plan.insertions));
+                initializers.addAll(plan.initializers);
+            }
+        }
+        return new StaticSourcePlan(Map.copyOf(transformed), List.copyOf(initializers));
+    }
+
+    private static SourceStaticPlan planSourceStaticInitializers(
+        Side side, Path sourceFile, String source, Path patchesRoot, JsonObject manifest
+    ) throws IOException {
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        if (compiler == null) {
+            throw new IOException("The bundled Allcraft SDK does not provide the Java source parser");
+        }
+        DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+        JavaFileObject input = new SimpleJavaFileObject(sourceFile.toUri(), JavaFileObject.Kind.SOURCE) {
+            @Override
+            public CharSequence getCharContent(boolean ignoreEncodingErrors) {
+                return source;
+            }
+        };
+        try (StandardJavaFileManager files = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8)) {
+            JavacTask task = (JavacTask)compiler.getTask(null, files, diagnostics, List.of("-proc:none"), null, List.of(input));
+            CompilationUnitTree unit = task.parse().iterator().next();
+            String parseFailure = diagnostics.getDiagnostics()
+                .stream()
+                .filter(value -> value.getKind() == Diagnostic.Kind.ERROR)
+                .map(value -> value.getLineNumber() + ": " + value.getMessage(Locale.ROOT))
+                .collect(java.util.stream.Collectors.joining(System.lineSeparator()));
+            if (!parseFailure.isEmpty()) {
+                throw new IOException("Source revision compilation failed while parsing " + sourceFile + ":\n" + parseFailure);
+            }
+            SourcePositions positions = Trees.instance(task).getSourcePositions();
+            String packageName = unit.getPackageName() == null ? "" : unit.getPackageName().toString();
+            List<TextInsertion> insertions = new ArrayList<>();
+            List<StaticInitializer> initializers = new ArrayList<>();
+            for (Tree declaration : unit.getTypeDecls()) {
+                if (declaration instanceof ClassTree type && !type.getSimpleName().isEmpty()) {
+                    String binaryName = packageName.isEmpty()
+                        ? type.getSimpleName().toString()
+                        : packageName + "." + type.getSimpleName();
+                    collectStaticInitializers(
+                        side, sourceFile, source, unit, positions, type, binaryName, patchesRoot, manifest, insertions, initializers
+                    );
+                }
+            }
+            return new SourceStaticPlan(List.copyOf(insertions), List.copyOf(initializers));
+        }
+    }
+
+    private static void collectStaticInitializers(
+        Side side,
+        Path sourceFile,
+        String source,
+        CompilationUnitTree unit,
+        SourcePositions positions,
+        ClassTree type,
+        String binaryName,
+        Path patchesRoot,
+        JsonObject manifest,
+        List<TextInsertion> insertions,
+        List<StaticInitializer> initializers
+    ) throws IOException {
+        byte[] previous = previousClassBytes(side, binaryName, patchesRoot, manifest);
+        Set<String> previousFields = previous == null
+            ? Set.of()
+            : ClassFile.of().parse(previous).fields().stream().map(field -> field.fieldName().stringValue()).collect(java.util.stream.Collectors.toSet());
+        List<String> methods = new ArrayList<>();
+        boolean implicitStaticFields = type.getKind() == Tree.Kind.INTERFACE || type.getKind() == Tree.Kind.ANNOTATION_TYPE;
+        for (Tree member : type.getMembers()) {
+            if (member instanceof VariableTree field) {
+                boolean enumConstant = type.getKind() == Tree.Kind.ENUM && field.getType() == null;
+                boolean isStatic = implicitStaticFields || field.getModifiers().getFlags().contains(Modifier.STATIC);
+                if (previous != null
+                    && isStatic
+                    && !enumConstant
+                    && field.getInitializer() != null
+                    && !previousFields.contains(field.getName().toString())) {
+                    if (source.contains(STATIC_INITIALIZER_PREFIX + field.getName())) {
+                        throw new IOException(
+                            sourceFile + " uses Allcraft's reserved automatic-initializer method prefix for field " + field.getName()
+                        );
+                    }
+                    long start = positions.getStartPosition(unit, field.getInitializer());
+                    long end = positions.getEndPosition(unit, field.getInitializer());
+                    if (start < 0L || end < start || end > source.length()) {
+                        throw new IOException("Cannot locate initializer source for " + binaryName + "." + field.getName());
+                    }
+                    String expression = source.substring((int)start, (int)end);
+                    String fieldType = field.getType().toString();
+                    String evaluated = expression.stripLeading().startsWith("{")
+                        ? "new " + fieldType + expression
+                        : "(" + fieldType + ") (" + expression + ")";
+                    String methodName = STATIC_INITIALIZER_PREFIX + field.getName();
+                    methods.add(
+                        "\n    private static java.lang.Object "
+                            + methodName
+                            + "() {\n        return "
+                            + evaluated
+                            + ";\n    }\n"
+                    );
+                    initializers.add(new StaticInitializer(binaryName, field.getName().toString(), methodName));
+                }
+            } else if (member instanceof ClassTree nested && !nested.getSimpleName().isEmpty()) {
+                collectStaticInitializers(
+                    side,
+                    sourceFile,
+                    source,
+                    unit,
+                    positions,
+                    nested,
+                    binaryName + "$" + nested.getSimpleName(),
+                    patchesRoot,
+                    manifest,
+                    insertions,
+                    initializers
+                );
+            }
+        }
+        if (!methods.isEmpty()) {
+            long end = positions.getEndPosition(unit, type);
+            if (end <= 0L || end > source.length() || source.charAt((int)end - 1) != '}') {
+                throw new IOException("Cannot locate class body end for " + binaryName);
+            }
+            insertions.add(new TextInsertion((int)end - 1, String.join("", methods)));
+        }
+    }
+
+    private static String applyInsertions(String source, List<TextInsertion> insertions) {
+        StringBuilder result = new StringBuilder(source);
+        insertions.stream()
+            .sorted(Comparator.comparingInt(TextInsertion::offset).reversed())
+            .forEach(insertion -> result.insert(insertion.offset, insertion.text));
+        return result.toString();
     }
 
     private static String compileClassPath(Side side, Path patchesRoot, JsonObject manifest) throws IOException {
@@ -844,14 +1031,19 @@ public final class AllcraftRevisionBuilder {
         return String.join(File.pathSeparator, roots);
     }
 
-    private static String cacheKey(Side side, List<Path> sources, String classPath) throws IOException {
+    private static String cacheKey(Side side, List<Path> sources, Map<Path, String> transformed, String classPath) throws IOException {
         MessageDigest digest = digest();
         update(digest, CACHE_FORMAT);
         update(digest, side.id);
         update(digest, configuredJavac().toString());
         for (Path source : sources) {
             update(digest, source.toString());
-            digest.update(Files.readAllBytes(source));
+            String generated = transformed.get(source);
+            if (generated == null) {
+                digest.update(Files.readAllBytes(source));
+            } else {
+                digest.update(generated.getBytes(StandardCharsets.UTF_8));
+            }
         }
         for (String value : classPath.split(Pattern.quote(File.pathSeparator))) {
             Path path = Path.of(value);
@@ -906,6 +1098,15 @@ public final class AllcraftRevisionBuilder {
             "entrypoints",
             strings(mergeLifecycle(side == Side.CLIENT ? request.clientEntrypoints : request.serverEntrypoints, build.entrypoints))
         );
+        JsonArray staticInitializers = new JsonArray();
+        for (StaticInitializer initializer : build.staticInitializers) {
+            JsonObject value = new JsonObject();
+            value.addProperty("class", initializer.className);
+            value.addProperty("field", initializer.fieldName);
+            value.addProperty("method", initializer.methodName);
+            staticInitializers.add(value);
+        }
+        descriptor.add("staticInitializers", staticInitializers);
         descriptor.addProperty("sharedContract", sharedContract.digest);
         JsonObject sharedClasses = new JsonObject();
         sharedContract.classes.forEach(sharedClasses::addProperty);
@@ -1705,6 +1906,7 @@ public final class AllcraftRevisionBuilder {
         List<String> compiledSources,
         Hooks hooks,
         List<String> entrypoints,
+        List<StaticInitializer> staticInitializers,
         boolean cacheHit,
         long compilationMillis
     ) {
@@ -1742,9 +1944,23 @@ public final class AllcraftRevisionBuilder {
     private record SharedContract(Map<String, String> classes, String digest) {
     }
 
-    private record Compilation(Map<String, byte[]> classes, boolean cacheHit, long elapsedMillis) {
+    private record StaticSourcePlan(Map<Path, String> sources, List<StaticInitializer> initializers) {
+    }
+
+    private record SourceStaticPlan(List<TextInsertion> insertions, List<StaticInitializer> initializers) {
+    }
+
+    private record TextInsertion(int offset, String text) {
+    }
+
+    public record StaticInitializer(String className, String fieldName, String methodName) {
+    }
+
+    private record Compilation(
+        Map<String, byte[]> classes, List<StaticInitializer> staticInitializers, boolean cacheHit, long elapsedMillis
+    ) {
         private static Compilation empty() {
-            return new Compilation(Map.of(), true, 0L);
+            return new Compilation(Map.of(), List.of(), true, 0L);
         }
     }
 

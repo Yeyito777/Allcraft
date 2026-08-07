@@ -13,6 +13,7 @@ import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
 import java.lang.instrument.ClassDefinition;
 import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -45,6 +46,7 @@ import org.slf4j.Logger;
 /** Applies arbitrary class-file overlays as reversible revision transactions. */
 public final class AllcraftRuntime {
     private static final Logger LOGGER = LogUtils.getLogger();
+    private static final sun.misc.Unsafe UNSAFE = unsafe();
     private static final Map<Class<?>, byte[]> BASE_DEFINITIONS = new IdentityHashMap<>();
     private static final Map<Class<?>, byte[]> CURRENT_DEFINITIONS = new IdentityHashMap<>();
     private static final Map<String, byte[]> TOMBSTONES = new HashMap<>();
@@ -77,6 +79,7 @@ public final class AllcraftRuntime {
         Map<String, String> sharedClasses = sharedClasses(descriptor);
         Hooks hooks = Hooks.from(descriptor.has("hooks") ? descriptor.getAsJsonObject("hooks") : new JsonObject());
         List<String> entrypoints = strings(descriptor, "entrypoints");
+        List<StaticInitializer> staticInitializers = staticInitializers(descriptor);
         verifyClasses(classes);
         verifyClasses(tombstones);
         verifyClasses(parentDefinitions);
@@ -84,6 +87,7 @@ public final class AllcraftRuntime {
         ClassLoader gameLoader = AllcraftRuntime.class.getClassLoader();
         Map<String, Class<?>> loaded = loadedClasses(instrumentation, gameLoader);
         validateLifecycle(classes, hooks, entrypoints, gameLoader);
+        validateStaticInitializers(classes, parentDefinitions, addedClasses, staticInitializers);
         validateSharedContract(descriptor, classes, parentDefinitions, addedClasses, sharedClasses);
         Map<String, byte[]> previous = new LinkedHashMap<>();
         for (String name : classes.keySet()) {
@@ -115,6 +119,7 @@ public final class AllcraftRuntime {
             sharedClasses,
             hooks,
             entrypoints,
+            staticInitializers,
             previous,
             context
         );
@@ -264,6 +269,13 @@ public final class AllcraftRuntime {
                 }
             }
 
+            // A helper call itself would initialize a previously-uninitialized class and execute
+            // the new <clinit>, duplicating the extracted field initializer. Initialize the parent
+            // definition first; for Minecraft bootstrap classes this is normally already a no-op.
+            for (String className : transaction.staticInitializers.stream().map(StaticInitializer::className).distinct().toList()) {
+                Class.forName(className, true, loader);
+            }
+
             // Preparation is allowed to allocate/checkpoint state but cannot observe redefined game
             // classes yet. Its own implementation (and rollback implementation) is infrastructure:
             // publish those hook classes first so a tombstoned hook can run again after world switch.
@@ -399,9 +411,12 @@ public final class AllcraftRuntime {
             transaction.published = true;
             AllcraftRegistries.run(
                 transaction.registryTransaction,
-                () -> invokeHooks(transaction.hooks.migrate, "allcraftMigrate", transaction.context)
+                () -> {
+                    invokeStaticInitializers(transaction.staticInitializers, loader);
+                    invokeHooks(transaction.hooks.migrate, "allcraftMigrate", transaction.context);
+                    invokeEntrypoints(transaction.entrypoints, loader);
+                }
             );
-            AllcraftRegistries.run(transaction.registryTransaction, () -> invokeEntrypoints(transaction.entrypoints, loader));
             transaction.registryTransaction.closePublication();
             if ("server".equals(transaction.context.side)) {
                 INTEGRATED_SERVER_PUBLICATIONS.put(transaction.context.patchId, transaction);
@@ -598,6 +613,71 @@ public final class AllcraftRuntime {
         }
     }
 
+    private static List<StaticInitializer> staticInitializers(JsonObject descriptor) throws IOException {
+        if (!descriptor.has("staticInitializers")) {
+            return List.of();
+        }
+        List<StaticInitializer> result = new ArrayList<>();
+        Set<String> fields = new LinkedHashSet<>();
+        try {
+            for (JsonElement element : descriptor.getAsJsonArray("staticInitializers")) {
+                JsonObject value = element.getAsJsonObject();
+                StaticInitializer initializer = new StaticInitializer(
+                    value.get("class").getAsString(), value.get("field").getAsString(), value.get("method").getAsString()
+                );
+                if (!fields.add(initializer.className + "\u0000" + initializer.fieldName)) {
+                    throw new IOException("Duplicate automatic static initializer for " + initializer.className + "." + initializer.fieldName);
+                }
+                result.add(initializer);
+            }
+        } catch (RuntimeException e) {
+            throw new IOException("Invalid automatic static initializer descriptor", e);
+        }
+        return List.copyOf(result);
+    }
+
+    private static void validateStaticInitializers(
+        Map<String, byte[]> classes,
+        Map<String, byte[]> parentDefinitions,
+        Set<String> addedClasses,
+        List<StaticInitializer> initializers
+    ) throws IOException {
+        for (StaticInitializer initializer : initializers) {
+            if (addedClasses.contains(initializer.className)) {
+                throw new IOException("New class " + initializer.className + " must use its ordinary static initializer");
+            }
+            byte[] bytes = classes.get(initializer.className);
+            byte[] parent = parentDefinitions.get(initializer.className);
+            if (bytes == null || parent == null) {
+                throw new IOException("Automatic static initializer class bytes are incomplete for " + initializer.className);
+            }
+            ClassModel model = ClassFile.of().parse(bytes);
+            boolean fieldPresent = model.fields()
+                .stream()
+                .anyMatch(
+                    field -> field.fieldName().equalsString(initializer.fieldName)
+                        && (field.flags().flagsMask() & ClassFile.ACC_STATIC) != 0
+                );
+            boolean parentFieldPresent = ClassFile.of().parse(parent)
+                .fields()
+                .stream()
+                .anyMatch(field -> field.fieldName().equalsString(initializer.fieldName));
+            if (!fieldPresent || parentFieldPresent) {
+                throw new IOException(
+                    "Automatic static initialization is valid only for a newly added static field: "
+                        + initializer.className
+                        + "."
+                        + initializer.fieldName
+                );
+            }
+            if (!hasMethod(bytes, initializer.methodName, "()Ljava/lang/Object;")) {
+                throw new IOException(
+                    "Automatic static initializer evaluator is missing for " + initializer.className + "." + initializer.fieldName
+                );
+            }
+        }
+    }
+
     private static Map<String, String> sharedClasses(JsonObject descriptor) throws IOException {
         if (!descriptor.has("sharedClasses")) {
             return Map.of();
@@ -729,6 +809,82 @@ public final class AllcraftRuntime {
         }
     }
 
+    private static void invokeStaticInitializers(List<StaticInitializer> initializers, ClassLoader loader) throws Exception {
+        for (StaticInitializer initializer : initializers) {
+            Class<?> type = Class.forName(initializer.className, true, loader);
+            Method evaluator = type.getDeclaredMethod(initializer.methodName);
+            if (!Modifier.isStatic(evaluator.getModifiers()) || evaluator.getParameterCount() != 0) {
+                throw new IllegalStateException(initializer.className + "." + initializer.methodName + " must be static and argument-free");
+            }
+            Object value = invokeForValue(evaluator);
+            Field field = type.getDeclaredField(initializer.fieldName);
+            if (!Modifier.isStatic(field.getModifiers())) {
+                throw new IllegalStateException(initializer.className + "." + initializer.fieldName + " is no longer static");
+            }
+            writeStaticField(field, value);
+            LOGGER.info("Initialized newly added static field {}.{}", initializer.className, initializer.fieldName);
+        }
+        if (!initializers.isEmpty()) {
+            UNSAFE.fullFence();
+        }
+    }
+
+    private static Object invokeForValue(Method method) throws Exception {
+        try {
+            method.setAccessible(true);
+            return method.invoke(null);
+        } catch (InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception exception) {
+                throw exception;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw e;
+        }
+    }
+
+    private static void writeStaticField(Field field, Object value) {
+        Class<?> fieldType = field.getType();
+        if (!fieldType.isPrimitive() && value != null && !fieldType.isInstance(value)) {
+            throw new IllegalStateException(
+                "Initializer for " + field.getDeclaringClass().getName() + "." + field.getName() + " produced " + value.getClass().getName()
+            );
+        }
+        Object base = UNSAFE.staticFieldBase(field);
+        long offset = UNSAFE.staticFieldOffset(field);
+        if (fieldType == boolean.class) {
+            UNSAFE.putBooleanVolatile(base, offset, (Boolean)value);
+        } else if (fieldType == byte.class) {
+            UNSAFE.putByteVolatile(base, offset, (Byte)value);
+        } else if (fieldType == short.class) {
+            UNSAFE.putShortVolatile(base, offset, (Short)value);
+        } else if (fieldType == char.class) {
+            UNSAFE.putCharVolatile(base, offset, (Character)value);
+        } else if (fieldType == int.class) {
+            UNSAFE.putIntVolatile(base, offset, (Integer)value);
+        } else if (fieldType == long.class) {
+            UNSAFE.putLongVolatile(base, offset, (Long)value);
+        } else if (fieldType == float.class) {
+            UNSAFE.putFloatVolatile(base, offset, (Float)value);
+        } else if (fieldType == double.class) {
+            UNSAFE.putDoubleVolatile(base, offset, (Double)value);
+        } else {
+            UNSAFE.putObjectVolatile(base, offset, value);
+        }
+    }
+
+    private static sun.misc.Unsafe unsafe() {
+        try {
+            Field field = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+            field.setAccessible(true);
+            return (sun.misc.Unsafe)field.get(null);
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
     private static void invoke(Method method, Object[] arguments) throws Exception {
         try {
             method.setAccessible(true);
@@ -857,6 +1013,7 @@ public final class AllcraftRuntime {
         private final Map<String, String> sharedClasses;
         private final Hooks hooks;
         private final List<String> entrypoints;
+        private final List<StaticInitializer> staticInitializers;
         private final Map<String, byte[]> stagedPrevious;
         private final Map<String, byte[]> publishedPrevious = new LinkedHashMap<>();
         private final Set<String> publishedClasses = new LinkedHashSet<>();
@@ -882,6 +1039,7 @@ public final class AllcraftRuntime {
             Map<String, String> sharedClasses,
             Hooks hooks,
             List<String> entrypoints,
+            List<StaticInitializer> staticInitializers,
             Map<String, byte[]> previous,
             MigrationContext context
         ) {
@@ -896,12 +1054,15 @@ public final class AllcraftRuntime {
             this.sharedClasses = sharedClasses;
             this.hooks = hooks;
             this.entrypoints = entrypoints;
+            this.staticInitializers = staticInitializers;
             this.stagedPrevious = new LinkedHashMap<>(previous);
             this.context = context;
             this.registryTransaction = AllcraftRegistries.transaction(
                 context.worldId(), context.side(), context.toRevision(), context.patchId()
             );
-            this.registryTransaction.sharedClasses(sharedClasses.keySet(), classes.keySet(), descriptor.has("sharedContract"));
+            Set<String> canonicalCallers = new LinkedHashSet<>(sharedClasses.keySet());
+            staticInitializers.stream().map(StaticInitializer::className).forEach(canonicalCallers::add);
+            this.registryTransaction.sharedClasses(canonicalCallers, classes.keySet(), descriptor.has("sharedContract"));
         }
 
         public synchronized ApplyResult publish() throws Exception {
@@ -1094,6 +1255,9 @@ public final class AllcraftRuntime {
         private static Hooks from(JsonObject object) {
             return new Hooks(strings(object, "prepare"), strings(object, "migrate"), strings(object, "commit"), strings(object, "rollback"));
         }
+    }
+
+    private record StaticInitializer(String className, String fieldName, String methodName) {
     }
 
 }

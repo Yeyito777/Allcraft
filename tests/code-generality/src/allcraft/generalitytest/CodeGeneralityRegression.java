@@ -36,6 +36,7 @@ public final class CodeGeneralityRegression {
 
         testSharedContractGuards(work);
         testIntegratedClassOwnership(work);
+        testVanillaStaticRegistryInitializer(work);
 
         Path firstWorld = world(work.resolve("world-a"));
         AllcraftRevisionBuilder.initializeBaseline(firstWorld);
@@ -120,10 +121,18 @@ public final class CodeGeneralityRegression {
         );
         require(cached.client().cacheHit(), "content-addressed client compiler cache did not hit");
         AllcraftRevisionBuilder.discard(cached);
+        System.clearProperty("allcraft.generality.staticInitCount");
         AllcraftRuntime.Transaction second = AllcraftRuntime.stage(revisionTwo.clientArtifactPath(), revisionTwo.clientSha256());
         second.publish();
         require("v2-a:structural".equals(callProbe()), "method/field structural evolution was not installed");
         require(probeValue() == 22, "revision two migration did not run");
+        require("1".equals(System.getProperty("allcraft.generality.staticInitCount")), "added static initializer did not run exactly once");
+        require(probeClass().getField("addedField").getModifiers() == 25, "added static final field lost its source modifiers");
+        require(probeClass().getField("addedNumber").getInt(null) == 37, "added primitive static final field was not initialized");
+        require(
+            java.util.Arrays.equals((String[])probeClass().getField("addedArray").get(null), new String[]{"left", "right"}),
+            "added array static final field was not initialized"
+        );
         require("lambda-v1".equals(callLambdaProbe()), "existing hidden lambda lost its removed implementation method");
         second.finish();
         commit(firstWorld, revisionTwo);
@@ -460,6 +469,57 @@ public final class CodeGeneralityRegression {
         writeHookConfig(source, "allcraft.generality.RevisionOneHooks");
     }
 
+    private static void testVanillaStaticRegistryInitializer(Path work) throws Exception {
+        net.minecraft.SharedConstants.tryDetectVersion();
+        net.minecraft.server.Bootstrap.bootStrap();
+        Path testWorld = world(work.resolve("static-registry-initializer"));
+        Path source = testWorld.resolve("source/client/net/minecraft/sounds/SoundEvents.java");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, "package net.minecraft.sounds; public class SoundEvents {}\n", StandardCharsets.UTF_8);
+        AllcraftRevisionBuilder.initializeBaseline(testWorld);
+        Files.writeString(
+            source,
+            """
+            package net.minecraft.sounds;
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.Identifier;
+            public class SoundEvents {
+                public static final SoundEvent ALLCRAFT_AUTOMATIC_TEST = Registry.register(
+                    BuiltInRegistries.SOUND_EVENT,
+                    Identifier.fromNamespaceAndPath("allcraft", "automatic_static_test"),
+                    SoundEvent.createVariableRangeEvent(Identifier.fromNamespaceAndPath("allcraft", "automatic_static_test"))
+                );
+            }
+            """,
+            StandardCharsets.UTF_8
+        );
+        AllcraftRevisionBuilder.PreparedRevision revision = AllcraftRevisionBuilder.prepare(
+            testWorld, AllcraftRevisionBuilder.Request.production("static-registry-init")
+        );
+        require(revision.client().staticInitializers().size() == 1, "vanilla static registry initializer was not discovered");
+        AllcraftRuntime.Transaction transaction = AllcraftRuntime.stage(revision.clientArtifactPath(), revision.clientSha256());
+        transaction.publish();
+        Class<?> sounds = Class.forName("net.minecraft.sounds.SoundEvents");
+        Object value = sounds.getField("ALLCRAFT_AUTOMATIC_TEST").get(null);
+        require(value != null, "new SoundEvents field remained null after enhanced redefinition");
+        require(
+            net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT
+                .getOptional(net.minecraft.resources.Identifier.fromNamespaceAndPath("allcraft", "automatic_static_test"))
+                .orElse(null)
+                == value,
+            "automatic static initializer did not execute inside the registry transaction"
+        );
+        transaction.rollback();
+        require(
+            net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT
+                .getOptional(net.minecraft.resources.Identifier.fromNamespaceAndPath("allcraft", "automatic_static_test"))
+                .isEmpty(),
+            "automatic static registry initialization was not rolled back"
+        );
+        AllcraftRevisionBuilder.discard(revision);
+    }
+
     private static void writeVersionTwo(Path source, String world) throws Exception {
         Path javaRoot = source.resolve("client/allcraft/generality");
         Files.writeString(
@@ -468,10 +528,17 @@ public final class CodeGeneralityRegression {
             package allcraft.generality;
             public class Probe {
                 public static int value = 11;
-                public static String addedField = "structural";
+                public static final String addedField = initializeAddedField();
+                public static final int addedNumber = 37;
+                public static final String[] addedArray = {"left", "right"};
                 public static String message() { return "v2-%s:" + addedField; }
                 public String liveMessage() { return "live-v2-%s"; }
                 public static long addedMethod(long input) { return input * 2L; }
+                private static String initializeAddedField() {
+                    int count = Integer.parseInt(System.getProperty("allcraft.generality.staticInitCount", "0"));
+                    System.setProperty("allcraft.generality.staticInitCount", Integer.toString(count + 1));
+                    return "structural";
+                }
             }
             """.formatted(world, world),
             StandardCharsets.UTF_8
@@ -485,7 +552,7 @@ public final class CodeGeneralityRegression {
                 public static void allcraftPrepare(MigrationContext context) throws Exception {
                     context.persistCheckpoint("probe", Integer.toString(Probe.value));
                 }
-                public static void allcraftMigrate(MigrationContext context) { Probe.value = 22; Probe.addedField = "structural"; }
+                public static void allcraftMigrate(MigrationContext context) { Probe.value = 22; }
                 public static void allcraftCommit(MigrationContext context) { }
                 public static void allcraftRollback(MigrationContext context) throws Exception {
                     String value = context.persistedCheckpoint("probe");
