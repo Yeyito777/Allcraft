@@ -339,6 +339,8 @@ public final class AllcraftRevisionBuilder {
         // for binary compatibility, closure compilation rejects the revision until the agent edits
         // that source explicitly; only explicitly changed sources become runtime definitions.
         Map<String, byte[]> classes = classesForSources(changedJava, compilation.classes);
+        hooks = mergeHooks(hooks, discoverHooks(classes));
+        List<String> entrypoints = discoverLifecycle(classes, "allcraftActivate", "()V");
 
         Set<String> previousClasses = classSet(previous, side);
         Set<String> prospectiveClasses = new LinkedHashSet<>(classSet(current, side));
@@ -390,6 +392,7 @@ public final class AllcraftRevisionBuilder {
             List.copyOf(addedClasses),
             List.copyOf(closure.stream().sorted().toList()),
             hooks,
+            entrypoints,
             compilation.cacheHit,
             compilation.elapsedMillis
         );
@@ -899,7 +902,10 @@ public final class AllcraftRevisionBuilder {
         descriptor.add("deletedClasses", strings(build.deletedClasses));
         descriptor.add("deletedResources", strings(build.deletedResources));
         descriptor.add("hooks", build.hooks.toJson());
-        descriptor.add("entrypoints", strings(side == Side.CLIENT ? request.clientEntrypoints : request.serverEntrypoints));
+        descriptor.add(
+            "entrypoints",
+            strings(mergeLifecycle(side == Side.CLIENT ? request.clientEntrypoints : request.serverEntrypoints, build.entrypoints))
+        );
         descriptor.addProperty("sharedContract", sharedContract.digest);
         JsonObject sharedClasses = new JsonObject();
         sharedContract.classes.forEach(sharedClasses::addProperty);
@@ -1273,11 +1279,55 @@ public final class AllcraftRevisionBuilder {
         return new Hooks(hook(selected, "prepare"), hook(selected, "migrate"), hook(selected, "commit"), hook(selected, "rollback"));
     }
 
+    private static Hooks discoverHooks(Map<String, byte[]> classes) {
+        String context = "(Lnet/minecraft/allcraft/AllcraftRuntime$MigrationContext;)V";
+        return new Hooks(
+            discoverLifecycle(classes, "allcraftPrepare", "()V", context),
+            discoverLifecycle(classes, "allcraftMigrate", "()V", context),
+            discoverLifecycle(classes, "allcraftCommit", "()V", context),
+            discoverLifecycle(classes, "allcraftRollback", "()V", context)
+        );
+    }
+
+    private static Hooks mergeHooks(Hooks configured, Hooks discovered) {
+        return new Hooks(
+            mergeLifecycle(configured.prepare, discovered.prepare),
+            mergeLifecycle(configured.migrate, discovered.migrate),
+            mergeLifecycle(configured.commit, discovered.commit),
+            mergeLifecycle(configured.rollback, discovered.rollback)
+        );
+    }
+
+    private static List<String> discoverLifecycle(Map<String, byte[]> classes, String methodName, String... descriptors) {
+        Set<String> acceptedDescriptors = Set.of(descriptors);
+        List<String> result = new ArrayList<>();
+        for (Map.Entry<String, byte[]> entry : classes.entrySet()) {
+            ClassModel model = ClassFile.of().parse(entry.getValue());
+            boolean present = model.methods().stream().anyMatch(
+                method -> method.methodName().equalsString(methodName)
+                    && acceptedDescriptors.contains(method.methodType().stringValue())
+                    && method.flags().has(java.lang.reflect.AccessFlag.STATIC)
+            );
+            if (present) result.add(className(entry.getKey()));
+        }
+        return result.stream().distinct().sorted().toList();
+    }
+
+    private static List<String> mergeLifecycle(List<String> first, List<String> second) {
+        Set<String> result = new LinkedHashSet<>(first);
+        result.addAll(second);
+        return result.stream().sorted().toList();
+    }
+
     private static void validateLifecycleAvailability(
         SourceSnapshot snapshot, SideBuild client, SideBuild server, Request request
     ) throws IOException {
-        validateLifecycleAvailability(snapshot, Side.CLIENT, client.hooks, request.clientEntrypoints);
-        validateLifecycleAvailability(snapshot, Side.SERVER, server.hooks, request.serverEntrypoints);
+        validateLifecycleAvailability(
+            snapshot, Side.CLIENT, client.hooks, mergeLifecycle(request.clientEntrypoints, client.entrypoints)
+        );
+        validateLifecycleAvailability(
+            snapshot, Side.SERVER, server.hooks, mergeLifecycle(request.serverEntrypoints, server.entrypoints)
+        );
     }
 
     private static void validateLifecycleAvailability(
@@ -1654,6 +1704,7 @@ public final class AllcraftRevisionBuilder {
         List<String> addedClasses,
         List<String> compiledSources,
         Hooks hooks,
+        List<String> entrypoints,
         boolean cacheHit,
         long compilationMillis
     ) {

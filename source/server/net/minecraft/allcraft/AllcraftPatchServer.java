@@ -499,11 +499,10 @@ public final class AllcraftPatchServer {
                     }
                 }
                 case WAITING_FOR_ROLLBACK -> {
-                    if (patch.serverResourceFuture != null && patch.serverResourceFuture.isCompletedExceptionally()) {
-                        patch.serverResourceFuture.join();
-                    }
-                    boolean resourcesDone = patch.serverResourceFuture == null || patch.serverResourceFuture.isDone();
-                    if (resourcesDone && run.rollbackPlayers.containsAll(run.expectedPlayers)) {
+                    if (!run.rollbackPlayers.containsAll(run.expectedPlayers)) {
+                        checkTimeout(server, run, tick, "ROLLBACK");
+                    } else if (!patch.serverDefinitionsRolledBack) {
+                        if (patch.serverResourceFuture != null && !patch.serverResourceFuture.isDone()) return;
                         try {
                             if (patch.serverTransaction != null && patch.serverTransaction.started()) {
                                 patch.serverTransaction.rollback();
@@ -514,9 +513,20 @@ public final class AllcraftPatchServer {
                                 + "; server class rollback failed: "
                                 + conciseMessage(e);
                         }
+                        patch.serverDefinitionsRolledBack = true;
+                        // Resource/data rollback may invoke world classes. Start it only after the
+                        // rejected definitions are gone, otherwise a lifecycle fix can run against
+                        // a frozen registry outside its transaction lease.
+                        patch.serverResourceFuture = AllcraftServerResources.rollback(server, run.patchesRoot);
+                    } else if (patch.serverResourceFuture == null || patch.serverResourceFuture.isDone()) {
+                        if (patch.serverResourceFuture != null && patch.serverResourceFuture.isCompletedExceptionally()) {
+                            try {
+                                patch.serverResourceFuture.join();
+                            } catch (CompletionException failure) {
+                                run.failureReason += "; server resource rollback failed: " + conciseMessage(failure);
+                            }
+                        }
                         failTest(server, run, run.failureReason == null ? "transaction rolled back" : run.failureReason);
-                    } else {
-                        checkTimeout(server, run, tick, "ROLLBACK");
                     }
                 }
                 case BETWEEN_PATCHES -> {
@@ -985,12 +995,13 @@ public final class AllcraftPatchServer {
         run.failureReason = reason;
         // Preserve the server-owned definitions until clients have rolled back their side-only
         // state. Integrated single-player shares one classloader, so rolling the server back first
-        // could let a still-queued client ACTIVATE re-install the rejected class body.
+        // could let a still-queued client ACTIVATE re-install the rejected class body. Also postpone
+        // resource rollback until after class rollback because data bootstrap may invoke world code.
         CompletableFuture<AllcraftServerResources.ApplyResult> inFlight = patch.serverResourceFuture;
         patch.serverResourceFuture = inFlight == null
-            ? AllcraftServerResources.rollback(server, run.patchesRoot)
-            : inFlight.handle((unused, failure) -> null)
-                .thenCompose(unused -> AllcraftServerResources.rollback(server, run.patchesRoot));
+            ? CompletableFuture.completedFuture(null)
+            : inFlight.handle((unused, failure) -> null);
+        patch.serverDefinitionsRolledBack = false;
         broadcastControl(server, run, patch, AllcraftPayloads.ControlAction.ABORT);
         run.phase = Phase.WAITING_FOR_ROLLBACK;
         run.phaseStartedAt = server.getTickCount();
@@ -1243,6 +1254,7 @@ public final class AllcraftPatchServer {
         private AllcraftRevisionBuilder.PreparedRevision preparedRevision;
         private AllcraftRuntime.Transaction serverTransaction;
         private AllcraftServerResources.PreflightResult serverResourcePreflight;
+        private boolean serverDefinitionsRolledBack;
         private boolean clientCacheHit;
         private boolean serverCacheHit;
         private long compilationMillis;

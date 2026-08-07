@@ -62,6 +62,8 @@ The same rule applies inside a redefined class. Methods and fields removed from 
 }
 ```
 
+Static `allcraftPrepare`, `allcraftMigrate`, `allcraftCommit`, `allcraftRollback`, and `allcraftActivate` methods in changed classes are discovered automatically. The JSON declaration remains useful when an unchanged lifecycle class must participate explicitly; ordinary AI revisions do not need to maintain a separate entrypoint list.
+
 Each listed class provides the corresponding static method:
 
 ```java
