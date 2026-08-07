@@ -1,6 +1,6 @@
 # AI Gameplay Benchmark Suite 1
 
-Suite 1 sends 16 real gameplay requests to Exocortex. It does not use `AllcraftPatchCompiler` fixtures: every case receives a private world-source worktree, Luna at `max` effort, the scoped Minecraft tools, normal automatic repair, and the production revision lifecycle.
+Suite 1 sends 16 real gameplay requests to Exocortex. It does not use `AllcraftPatchCompiler` fixtures: every case receives a private world-source worktree, Sol at `low` effort, the scoped Minecraft tools, normal automatic repair, and the production revision lifecycle. Asset-bearing cases request original textures, models, sprites, and audio rather than allowing vanilla assets to stand in for them.
 
 This is intentionally expensive. Use a fresh creative world and do not run it as part of routine smoke tests.
 

@@ -35,28 +35,28 @@ public final class AllcraftAiTestSuites {
 
     static final List<BenchmarkCase> PHASE_A = List.of(
         new BenchmarkCase("double-jump", """
-            Add a double-jump mechanic. A survival player may press jump once while airborne to jump again. It resets after touching the ground. Play a subtle sound and particle effect when the second jump happens.
+            Add a double-jump mechanic. A survival player may press jump once while airborne to jump again. It resets after touching the ground. Play a subtle original sound and use an original particle texture when the second jump happens.
             """),
         new BenchmarkCase("blink", """
             Add a keybind named Blink, bound to B by default. Pressing it teleports the player up to five blocks forward if the destination is safe. The server must authorize the teleport. Give it a three-second cooldown and show the remaining cooldown above the hotbar.
             """),
         new BenchmarkCase("ruby-item", """
-            Add an item with the exact resource ID allcraft:ruby. Give it the translated English name Ruby, an item model, a crafting recipe, and creative inventory presence. Craft it from one diamond surrounded by redstone. Existing vanilla textures may be reused to give it a red gemstone appearance.
+            Add an item with the exact resource ID allcraft:ruby. Give it the translated English name Ruby, an item model, a crafting recipe, and creative inventory presence. Craft it from one diamond surrounded by redstone. Give it an original red gemstone texture rather than referencing a vanilla texture.
             """),
         new BenchmarkCase("spring-block", """
-            Add a block with the exact resource ID allcraft:spring_block. It should be craftable, obtainable in creative mode, drop itself when broken, and launch entities upward when they land on it. Give it a distinctive model using existing vanilla textures.
+            Add a block with the exact resource ID allcraft:spring_block. It should be craftable, obtainable in creative mode, drop itself when broken, and launch entities upward when they land on it. Give it a distinctive original model and texture rather than referencing vanilla block textures.
             """),
         new BenchmarkCase("echo-cow", """
-            Add a mob with the exact resource ID allcraft:echo_cow and the translated name Echo Cow. It should behave like a cow, have twice as much health, periodically emit note particles, drop an additional amethyst shard, and be summonable with /summon allcraft:echo_cow. Reusing the cow renderer and texture is acceptable.
+            Add a mob with the exact resource ID allcraft:echo_cow and the translated name Echo Cow. It should behave like a cow, have twice as much health, periodically emit note particles, drop an additional amethyst shard, and be summonable with /summon allcraft:echo_cow. Give it an original cow-like model and texture rather than reusing the cow renderer or texture.
             """),
         new BenchmarkCase("lapis-alchemy-table", """
-            Add a block with the exact resource ID allcraft:lapis_alchemy_table and the translated name Lapis Alchemy Table. Give it its own menu and screen. It should accept one lapis lazuli and one iron ingot and produce one diamond after five seconds. It must preserve its inventory when the menu closes and when the world is saved and reopened.
+            Add a block with the exact resource ID allcraft:lapis_alchemy_table and the translated name Lapis Alchemy Table. Give it its own menu and screen, with original block, item, and menu textures. It should accept one lapis lazuli and one iron ingot and produce one diamond after five seconds. It must preserve its inventory when the menu closes and when the world is saved and reopened.
             """),
         new BenchmarkCase("comet-particle", """
-            Add a particle type with the exact resource ID allcraft:comet that can be spawned using the normal /particle command. It should move forward while leaving a short sparkling trail. Existing vanilla particle sprites may be reused.
+            Add a particle type with the exact resource ID allcraft:comet that can be spawned using the normal /particle command. It should move forward while leaving a short sparkling trail. Give it original particle sprites rather than referencing vanilla sprite textures.
             """),
         new BenchmarkCase("moonlight-disc", """
-            Add a craftable music disc item with the exact resource ID allcraft:moonlight_disc and the translated name Moonlight Disc. It should work in jukeboxes and play an existing suitable vanilla music track. Give it its own item model.
+            Add a craftable music disc item with the exact resource ID allcraft:moonlight_disc and the translated name Moonlight Disc. It should work in jukeboxes and play its own original music track. Give it its own original item model and texture.
             """),
         new BenchmarkCase("flying-boats", """
             Allow occupied boats to fly. While riding a boat, holding jump should make it ascend, and holding sneak should make it descend. The server must remain authoritative and other players must see the boat moving correctly.
@@ -68,7 +68,7 @@ public final class AllcraftAiTestSuites {
             At midnight every third Minecraft day, begin a zombie invasion near each survival player. Announce it in chat, spawn three waves over one minute, and scale the number and strength of zombies with the world's age. Do not start another invasion while one is active, and preserve the schedule across a save and reopen.
             """),
         new BenchmarkCase("dirt-makeover", """
-            Change dirt so that its placed block, inventory model, map appearance, and break particles use the diamond-block appearance. Rename it to Diamond Dirt in English. The change must remain after F3+T, across distant chunks, and after leaving and rejoining the world.
+            Change dirt so that its placed block, inventory model, map appearance, and break particles use a distinctive original diamond-inspired appearance without referencing the vanilla diamond-block model or texture. Rename it to Diamond Dirt in English. The change must remain after F3+T, across distant chunks, and after leaving and rejoining the world.
             """)
     );
 
@@ -159,7 +159,7 @@ public final class AllcraftAiTestSuites {
         String runId = run.runId;
         source.sendSuccess(
             () -> Component.literal(
-                "Started suite-1-a run " + shortId(runId) + ": 12 Luna/max AI editors queued at revision " + batch.baseRevision()
+                "Started suite-1-a run " + shortId(runId) + ": 12 Sol/low AI editors queued at revision " + batch.baseRevision()
             ).withStyle(ChatFormatting.AQUA),
             false
         );

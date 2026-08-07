@@ -31,9 +31,9 @@ public final class AllcraftAiLauncherRegression {
         Path module = Path.of("/tmp/minecraft-tools.ts");
         List<String> command = AllcraftAiLauncher.command(executable, module);
         require(command.getFirst().equals(executable.toString()), "executable is argv[0]");
-        require(command.containsAll(List.of("send", "--model", "openai/gpt-5.6-luna", "--effort", "max", "--custom-tool", module.toString(), "--folder", "allcraft/logs", "--auto-title", "--detach", "--id")), "required send arguments");
-        require(command.get(command.indexOf("--model") + 1).equals(AllcraftAiLauncher.MODEL), "Luna model is explicit");
-        require(command.get(command.indexOf("--effort") + 1).equals(AllcraftAiLauncher.EFFORT), "maximum effort is explicit");
+        require(command.containsAll(List.of("send", "--model", "openai/gpt-5.6-sol", "--effort", "low", "--custom-tool", module.toString(), "--folder", "allcraft/logs", "--auto-title", "--detach", "--id")), "required send arguments");
+        require(command.get(command.indexOf("--model") + 1).equals(AllcraftAiLauncher.MODEL), "Sol model is explicit");
+        require(command.get(command.indexOf("--effort") + 1).equals(AllcraftAiLauncher.EFFORT), "low effort is explicit");
         require(count(command, "--internal-tool") == 9L, "nine exact internal tools");
         require(command.containsAll(List.of("read", "write", "edit", "patch", "bash", "glob", "grep", "minecraft_glob", "minecraft_grep")), "intended tool names");
         require(!command.contains("--external-tool"), "no external tools selected");

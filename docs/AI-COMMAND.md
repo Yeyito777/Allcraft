@@ -63,7 +63,7 @@ Allcraft currently invokes this machine-specific executable:
 /home/yeyito/Workspace/exocortex/external-tools/exo-cli/bin/exo
 ```
 
-Conversations are placed in the Exocortex sidebar folder `allcraft/logs`; Exocortex generates their titles. New Allcraft editing conversations explicitly use `openai/gpt-5.6-luna` at `max` reasoning effort rather than inheriting Exocortex's defaults. Repair turns also reassert `max` effort on the existing conversation. Allcraft durably reserves each conversation ID before creation, starts turns detached, observes completion through `exo info --json`, and sends repair diagnostics through `exo send --conv <id>`. Launch locks, reserved IDs, and candidate-commit recovery make server-stop/crash windows restart-idempotent.
+Conversations are placed in the Exocortex sidebar folder `allcraft/logs`; Exocortex generates their titles. New Allcraft editing conversations explicitly use `openai/gpt-5.6-sol` at `low` reasoning effort rather than inheriting Exocortex's defaults. Repair turns also reassert `low` effort on the existing conversation. Allcraft durably reserves each conversation ID before creation, starts turns detached, observes completion through `exo info --json`, and sends repair diagnostics through `exo send --conv <id>`. Launch locks, reserved IDs, and candidate-commit recovery make server-stop/crash windows restart-idempotent.
 
 Each worktree contains:
 

@@ -6,7 +6,7 @@ Open a world, then run:
 /allcraft test <test-name>
 ```
 
-The expensive real-agent benchmark is split across `/allcraft test suite-1-a` and `/allcraft test suite-1-b`. It queues 16 Luna/max gameplay requests rather than fixture patches; see [`AI-BENCHMARK.md`](AI-BENCHMARK.md) before running it.
+The expensive real-agent benchmark is split across `/allcraft test suite-1-a` and `/allcraft test suite-1-b`. It queues 16 Sol/low gameplay requests rather than fixture patches; see [`AI-BENCHMARK.md`](AI-BENCHMARK.md) before running it.
 
 The networking tests edit an ordinary world-source fixture and submit five sequential revisions through the production differ/artifact pipeline. They stream, cache, schedule, activate, and acknowledge five distinct compiled patch JARs:
 

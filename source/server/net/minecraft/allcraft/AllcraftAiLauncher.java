@@ -16,8 +16,8 @@ import net.minecraft.commands.CommandSourceStack;
 public final class AllcraftAiLauncher {
     static final Path EXO_CLI = Path.of("/home/yeyito/Workspace/exocortex/external-tools/exo-cli/bin/exo");
     static final Path TOOL_MODULE_RELATIVE = Path.of(".allcraft/exocortex/minecraft-tools.ts");
-    static final String MODEL = "openai/gpt-5.6-luna";
-    static final String EFFORT = "max";
+    static final String MODEL = "openai/gpt-5.6-sol";
+    static final String EFFORT = "low";
     private static final Pattern CONVERSATION_ID = Pattern.compile("[0-9]+-[a-z0-9]{6}");
 
     private AllcraftAiLauncher() {
