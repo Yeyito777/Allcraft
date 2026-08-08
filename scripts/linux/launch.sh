@@ -48,6 +48,7 @@ exec "$java" \
     -Dallcraft.gameDir="$game_dir" \
     -Dallcraft.javac="$java_home/bin/javac" \
     -Dallcraft.compileClasspath="$(<"$build_dir/compile-classpath.txt")" \
+    -Dallcraft.ai.effort="${ALLCRAFT_AI_EFFORT:-low}" \
     -Dallcraft.baseVersion=26.2-allcraft \
     -Dminecraft.launcher.brand=Allcraft \
     -Dminecraft.launcher.version=0.1 \

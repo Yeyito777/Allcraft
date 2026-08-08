@@ -47,7 +47,7 @@ public final class AllcraftAiLauncher {
             "--model",
             MODEL,
             "--effort",
-            EFFORT,
+            configuredEffort(),
             "--custom-tool",
             toolModule.toString(),
             "--internal-tool",
@@ -129,11 +129,19 @@ public final class AllcraftAiLauncher {
     static CliResult continueCli(Path executable, Path sourceRoot, String conversationId, String request, Duration timeout)
         throws IOException, InterruptedException {
         return runIdCommand(
-            List.of(executable.toString(), "send", "--conv", conversationId, "--effort", EFFORT, "--detach", "--id"),
+            List.of(executable.toString(), "send", "--conv", conversationId, "--effort", configuredEffort(), "--detach", "--id"),
             sourceRoot,
             request,
             timeout
         );
+    }
+
+    static String configuredEffort() {
+        String value = System.getProperty("allcraft.ai.effort", EFFORT).strip().toLowerCase(java.util.Locale.ROOT);
+        return switch (value) {
+            case "none", "minimal", "low", "medium", "high", "xhigh", "max" -> value;
+            default -> throw new IllegalArgumentException("Unsupported Allcraft AI effort: " + value);
+        };
     }
 
     static CliInfo info(Path executable, Path sourceRoot, String conversationId, Duration timeout)
