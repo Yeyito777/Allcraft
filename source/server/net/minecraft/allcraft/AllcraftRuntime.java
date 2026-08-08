@@ -37,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -47,6 +48,7 @@ import org.slf4j.Logger;
 public final class AllcraftRuntime {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final sun.misc.Unsafe UNSAFE = unsafe();
+    private static final Map<String, Field> INSTANCE_FIELD_CACHE = new HashMap<>();
     private static final Map<Class<?>, byte[]> BASE_DEFINITIONS = new IdentityHashMap<>();
     private static final Map<Class<?>, byte[]> CURRENT_DEFINITIONS = new IdentityHashMap<>();
     private static final Map<String, byte[]> TOMBSTONES = new HashMap<>();
@@ -80,6 +82,7 @@ public final class AllcraftRuntime {
         Hooks hooks = Hooks.from(descriptor.has("hooks") ? descriptor.getAsJsonObject("hooks") : new JsonObject());
         List<String> entrypoints = strings(descriptor, "entrypoints");
         List<StaticInitializer> staticInitializers = staticInitializers(descriptor);
+        List<InstanceInitializer> instanceInitializers = instanceInitializers(descriptor);
         verifyClasses(classes);
         verifyClasses(tombstones);
         verifyClasses(parentDefinitions);
@@ -88,6 +91,7 @@ public final class AllcraftRuntime {
         Map<String, Class<?>> loaded = loadedClasses(instrumentation, gameLoader);
         validateLifecycle(classes, hooks, entrypoints, gameLoader);
         validateStaticInitializers(classes, parentDefinitions, addedClasses, staticInitializers);
+        validateInstanceInitializers(classes, parentDefinitions, addedClasses, instanceInitializers);
         validateSharedContract(descriptor, classes, parentDefinitions, addedClasses, sharedClasses);
         Map<String, byte[]> previous = new LinkedHashMap<>();
         for (String name : classes.keySet()) {
@@ -120,6 +124,7 @@ public final class AllcraftRuntime {
             hooks,
             entrypoints,
             staticInitializers,
+            instanceInitializers,
             previous,
             context
         );
@@ -177,6 +182,7 @@ public final class AllcraftRuntime {
         }
         if (!definitions.isEmpty()) {
             instrumentation.redefineClasses(definitions.toArray(ClassDefinition[]::new));
+            clearInstanceFieldCache();
             CURRENT_DEFINITIONS.putAll(next);
             LOGGER.info("Reconciled {} base runtime class(es) while retaining world-added definitions safely", definitions.size());
         }
@@ -215,11 +221,13 @@ public final class AllcraftRuntime {
             hookDefinitions.add(new ClassDefinition(type, desired));
         }
         instrumentation.redefineClasses(hookDefinitions.toArray(ClassDefinition[]::new));
+        clearInstanceFieldCache();
         try {
             invokeHooks(transaction.hooks.rollback, "allcraftRollback", transaction.context);
         } finally {
             if (!restoreDefinitions.isEmpty()) {
                 instrumentation.redefineClasses(restoreDefinitions.toArray(ClassDefinition[]::new));
+                clearInstanceFieldCache();
             }
         }
         LOGGER.warn("Ran crash-recovery rollback hooks for transaction {}", transaction.context.patchId);
@@ -320,6 +328,7 @@ public final class AllcraftRuntime {
             if (!earlyDefinitions.isEmpty()) {
                 long redefineStart = System.nanoTime();
                 instrumentation.redefineClasses(earlyDefinitions.toArray(ClassDefinition[]::new));
+                clearInstanceFieldCache();
                 redefineMillis += elapsedMillis(redefineStart);
                 CURRENT_DEFINITIONS.putAll(earlyChanged);
                 for (ClassDefinition definition : earlyDefinitions) {
@@ -402,6 +411,7 @@ public final class AllcraftRuntime {
             if (!definitions.isEmpty()) {
                 long redefineStart = System.nanoTime();
                 instrumentation.redefineClasses(definitions.toArray(ClassDefinition[]::new));
+                clearInstanceFieldCache();
                 redefineMillis += elapsedMillis(redefineStart);
                 CURRENT_DEFINITIONS.putAll(changed);
                 for (ClassDefinition definition : definitions) {
@@ -523,6 +533,7 @@ public final class AllcraftRuntime {
         try {
             if (!definitions.isEmpty()) {
                 instrumentation.redefineClasses(definitions.toArray(ClassDefinition[]::new));
+                clearInstanceFieldCache();
                 CURRENT_DEFINITIONS.putAll(restored);
             }
         } catch (Throwable failure) {
@@ -678,6 +689,93 @@ public final class AllcraftRuntime {
         }
     }
 
+    private static List<InstanceInitializer> instanceInitializers(JsonObject descriptor) throws IOException {
+        if (!descriptor.has("instanceInitializers")) {
+            return List.of();
+        }
+        List<InstanceInitializer> result = new ArrayList<>();
+        Set<String> fields = new LinkedHashSet<>();
+        try {
+            for (JsonElement element : descriptor.getAsJsonArray("instanceInitializers")) {
+                JsonObject value = element.getAsJsonObject();
+                InstanceInitializer initializer = new InstanceInitializer(
+                    value.get("class").getAsString(),
+                    value.get("field").getAsString(),
+                    value.get("method").getAsString(),
+                    value.get("getter").getAsString(),
+                    value.get("setter").getAsString(),
+                    value.get("flag").getAsString()
+                );
+                if (!fields.add(initializer.className + "\u0000" + initializer.fieldName)) {
+                    throw new IOException(
+                        "Duplicate automatic instance initializer for " + initializer.className + "." + initializer.fieldName
+                    );
+                }
+                result.add(initializer);
+            }
+        } catch (RuntimeException e) {
+            throw new IOException("Invalid automatic instance initializer descriptor", e);
+        }
+        return List.copyOf(result);
+    }
+
+    private static void validateInstanceInitializers(
+        Map<String, byte[]> classes,
+        Map<String, byte[]> parentDefinitions,
+        Set<String> addedClasses,
+        List<InstanceInitializer> initializers
+    ) throws IOException {
+        for (InstanceInitializer initializer : initializers) {
+            if (addedClasses.contains(initializer.className)) {
+                throw new IOException("New class " + initializer.className + " must use its ordinary instance initializer");
+            }
+            byte[] bytes = classes.get(initializer.className);
+            byte[] parent = parentDefinitions.get(initializer.className);
+            if (bytes == null || parent == null) {
+                throw new IOException("Automatic instance initializer class bytes are incomplete for " + initializer.className);
+            }
+            ClassModel model = ClassFile.of().parse(bytes);
+            Optional<java.lang.classfile.FieldModel> field = model.fields()
+                .stream()
+                .filter(
+                    candidate -> candidate.fieldName().equalsString(initializer.fieldName)
+                        && (candidate.flags().flagsMask() & ClassFile.ACC_STATIC) == 0
+                )
+                .findFirst();
+            boolean parentFieldPresent = ClassFile.of().parse(parent)
+                .fields()
+                .stream()
+                .anyMatch(candidate -> candidate.fieldName().equalsString(initializer.fieldName));
+            if (field.isEmpty() || parentFieldPresent) {
+                throw new IOException(
+                    "Automatic instance initialization is valid only for a newly added instance field: "
+                        + initializer.className
+                        + "."
+                        + initializer.fieldName
+                );
+            }
+            String descriptor = field.get().fieldType().stringValue();
+            boolean flagPresent = model.fields()
+                .stream()
+                .anyMatch(
+                    candidate -> candidate.fieldName().equalsString(initializer.flagName)
+                        && candidate.fieldType().equalsString("Z")
+                        && (candidate.flags().flagsMask() & ClassFile.ACC_STATIC) == 0
+                );
+            if (!flagPresent
+                || !hasInstanceMethod(bytes, initializer.evaluatorName, "()Ljava/lang/Object;")
+                || !hasInstanceMethod(bytes, initializer.getterName, "()" + descriptor)
+                || !hasInstanceMethod(bytes, initializer.setterName, "(" + descriptor + ")V")) {
+                throw new IOException(
+                    "Automatic instance initializer accessors are incomplete for "
+                        + initializer.className
+                        + "."
+                        + initializer.fieldName
+                );
+            }
+        }
+    }
+
     private static Map<String, String> sharedClasses(JsonObject descriptor) throws IOException {
         if (!descriptor.has("sharedClasses")) {
             return Map.of();
@@ -750,6 +848,17 @@ public final class AllcraftRuntime {
                 method -> method.methodName().stringValue().equals(name)
                     && method.methodType().stringValue().equals(descriptor)
                     && (method.flags().flagsMask() & ClassFile.ACC_STATIC) != 0
+            );
+    }
+
+    private static boolean hasInstanceMethod(byte[] bytes, String name, String descriptor) {
+        ClassModel model = ClassFile.of().parse(bytes);
+        return model.methods()
+            .stream()
+            .anyMatch(
+                method -> method.methodName().stringValue().equals(name)
+                    && method.methodType().stringValue().equals(descriptor)
+                    && (method.flags().flagsMask() & ClassFile.ACC_STATIC) == 0
             );
     }
 
@@ -872,6 +981,72 @@ public final class AllcraftRuntime {
             UNSAFE.putDoubleVolatile(base, offset, (Double)value);
         } else {
             UNSAFE.putObjectVolatile(base, offset, value);
+        }
+    }
+
+    /** Writes a lazily evaluated initializer into a field added to an already-live object. */
+    public static void initializeAddedInstanceField(
+        Object target, String declaringClassName, String fieldName, Object value
+    ) {
+        if (target == null) {
+            throw new NullPointerException("Automatic instance initializer target is null");
+        }
+        Field field;
+        String key = declaringClassName + "\u0000" + fieldName;
+        synchronized (INSTANCE_FIELD_CACHE) {
+            field = INSTANCE_FIELD_CACHE.get(key);
+            if (field == null) {
+                try {
+                    Class<?> declaringClass = Class.forName(declaringClassName, false, AllcraftRuntime.class.getClassLoader());
+                    if (!declaringClass.isInstance(target)) {
+                        throw new IllegalArgumentException(
+                            target.getClass().getName() + " is not an instance of " + declaringClassName
+                        );
+                    }
+                    field = declaringClass.getDeclaredField(fieldName);
+                    if (Modifier.isStatic(field.getModifiers())) {
+                        throw new IllegalArgumentException(declaringClassName + "." + fieldName + " is static");
+                    }
+                    INSTANCE_FIELD_CACHE.put(key, field);
+                } catch (ReflectiveOperationException e) {
+                    throw new IllegalStateException(
+                        "Cannot resolve automatic instance initializer field " + declaringClassName + "." + fieldName,
+                        e
+                    );
+                }
+            }
+        }
+        Class<?> fieldType = field.getType();
+        if (!fieldType.isPrimitive() && value != null && !fieldType.isInstance(value)) {
+            throw new IllegalStateException(
+                "Initializer for " + declaringClassName + "." + fieldName + " produced " + value.getClass().getName()
+            );
+        }
+        long offset = UNSAFE.objectFieldOffset(field);
+        if (fieldType == boolean.class) {
+            UNSAFE.putBooleanVolatile(target, offset, (Boolean)value);
+        } else if (fieldType == byte.class) {
+            UNSAFE.putByteVolatile(target, offset, (Byte)value);
+        } else if (fieldType == short.class) {
+            UNSAFE.putShortVolatile(target, offset, (Short)value);
+        } else if (fieldType == char.class) {
+            UNSAFE.putCharVolatile(target, offset, (Character)value);
+        } else if (fieldType == int.class) {
+            UNSAFE.putIntVolatile(target, offset, (Integer)value);
+        } else if (fieldType == long.class) {
+            UNSAFE.putLongVolatile(target, offset, (Long)value);
+        } else if (fieldType == float.class) {
+            UNSAFE.putFloatVolatile(target, offset, (Float)value);
+        } else if (fieldType == double.class) {
+            UNSAFE.putDoubleVolatile(target, offset, (Double)value);
+        } else {
+            UNSAFE.putObjectVolatile(target, offset, value);
+        }
+    }
+
+    private static void clearInstanceFieldCache() {
+        synchronized (INSTANCE_FIELD_CACHE) {
+            INSTANCE_FIELD_CACHE.clear();
         }
     }
 
@@ -1014,6 +1189,7 @@ public final class AllcraftRuntime {
         private final Hooks hooks;
         private final List<String> entrypoints;
         private final List<StaticInitializer> staticInitializers;
+        private final List<InstanceInitializer> instanceInitializers;
         private final Map<String, byte[]> stagedPrevious;
         private final Map<String, byte[]> publishedPrevious = new LinkedHashMap<>();
         private final Set<String> publishedClasses = new LinkedHashSet<>();
@@ -1040,6 +1216,7 @@ public final class AllcraftRuntime {
             Hooks hooks,
             List<String> entrypoints,
             List<StaticInitializer> staticInitializers,
+            List<InstanceInitializer> instanceInitializers,
             Map<String, byte[]> previous,
             MigrationContext context
         ) {
@@ -1055,6 +1232,7 @@ public final class AllcraftRuntime {
             this.hooks = hooks;
             this.entrypoints = entrypoints;
             this.staticInitializers = staticInitializers;
+            this.instanceInitializers = instanceInitializers;
             this.stagedPrevious = new LinkedHashMap<>(previous);
             this.context = context;
             this.registryTransaction = AllcraftRegistries.transaction(
@@ -1062,6 +1240,7 @@ public final class AllcraftRuntime {
             );
             Set<String> canonicalCallers = new LinkedHashSet<>(sharedClasses.keySet());
             staticInitializers.stream().map(StaticInitializer::className).forEach(canonicalCallers::add);
+            instanceInitializers.stream().map(InstanceInitializer::className).forEach(canonicalCallers::add);
             this.registryTransaction.sharedClasses(canonicalCallers, classes.keySet(), descriptor.has("sharedContract"));
         }
 
@@ -1258,6 +1437,16 @@ public final class AllcraftRuntime {
     }
 
     private record StaticInitializer(String className, String fieldName, String methodName) {
+    }
+
+    private record InstanceInitializer(
+        String className,
+        String fieldName,
+        String evaluatorName,
+        String getterName,
+        String setterName,
+        String flagName
+    ) {
     }
 
 }

@@ -43,6 +43,8 @@ The same rule applies inside a redefined class. Methods and fields removed from 
 
 New initialized static fields in an existing class preserve ordinary source semantics automatically. The source-aware compiler extracts each new field expression into a private evaluator, records it in the artifact, and the runtime evaluates it exactly once after structural redefinition. The resulting value is published into the new field even when it is `static final`; registry side effects run inside the same reversible registry transaction. The class's complete `<clinit>` is never replayed, so existing static state and bootstrap registrations are not duplicated. New classes continue to use normal JVM class initialization, while new static fields without an initializer retain Java's default value.
 
+New initialized instance fields are automatic as well. Enhanced redefinition gives pre-existing objects only Java's default value, so the compiler emits a per-field lazy evaluator and rewrites source-level field reads/writes to generated accessors. Existing objects evaluate the original source expression exactly once on first read; objects constructed after the revision run the expression through their ordinary constructor path and are marked initialized. Reference, primitive, array, mutable, and `final` fields use the same mechanism. Accessors remain part of the retained binary identity, and later revisions are compiled against the newest parent artifact, so code added in a later revision keeps the same semantics. This adds no heap scan or activation pause. Fields intentionally declared without an initializer keep Java's default value.
+
 ## Lifecycle hooks
 
 `source/allcraft-revision.json` may name arbitrary static hook classes independently for each side:
@@ -89,7 +91,7 @@ Every declared hook/entrypoint class must exist in the selected source revision 
 4. Publish dedicated prepare/rollback hook implementations.
 5. Run `prepare` against the old game revision.
 6. Atomically redefine loaded classes and activate genuine additions at the scheduled tick; packet processing continues while gameplay is paused at the publication barrier.
-7. Initialize newly added static fields, then run `migrate`, legacy activation entrypoints, the server-assigned registry plan, and resource/data publication.
+7. Initialize newly added static fields, install lazy semantics for added instance fields, then run `migrate`, legacy activation entrypoints, the server-assigned registry plan, and resource/data publication.
 8. Rebuild and validate known lazy client consumers such as Creative inventory tabs/search while definitions remain reversible. Peers then report `APPLIED` with a complete registry-ID fingerprint; any validation failure or disagreement aborts publication.
 9. Run `commit`; peers report `COMMITTED` while all transactions remain reversible.
 10. Resume one complete gameplay tick as a probation tick on both the server and every client. An immediate state-migration or linkage failure is caught before the process crash boundary, rolls every peer back, and becomes AI repair feedback.
@@ -116,4 +118,4 @@ tests/jvm/run.sh jvm/linux-x64
 tests/ai-worktrees/run.sh
 ```
 
-The generality suite covers arbitrary client/server inputs, shared-contract divergence/tampering, changed-source compilation boundaries, content-addressed cache hits, resource movement, structural class evolution, automatic object/primitive/array static initialization, frozen-registry initialization and rollback, explicit live-state migration, compile and migration failures, rollback, live-object-safe retirement, world switching, reconnect replay, and JFR-enabled execution. The JVM suite covers methods, fields, constructors, interfaces, active frames, C2, attach, and JFR behavior.
+The generality suite covers arbitrary client/server inputs, shared-contract divergence/tampering, changed-source compilation boundaries, newest-parent classpath resolution, content-addressed cache hits, resource movement, structural class evolution, automatic object/primitive/array static initialization, automatic reference/primitive/mutable/final instance initialization for both old and new objects, frozen-registry initialization and rollback, explicit live-state migration, compile and migration failures, rollback, live-object-safe retirement, world switching, reconnect replay, and JFR-enabled execution. The JVM suite covers methods, fields, constructors, interfaces, active frames, C2, attach, and JFR behavior.

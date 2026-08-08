@@ -22,6 +22,8 @@ import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
 import java.lang.classfile.ClassTransform;
 import java.lang.classfile.CodeTransform;
+import java.lang.classfile.Opcode;
+import java.lang.classfile.instruction.FieldInstruction;
 import java.lang.constant.ClassDesc;
 import java.lang.constant.MethodTypeDesc;
 import java.nio.charset.StandardCharsets;
@@ -74,10 +76,14 @@ public final class AllcraftRevisionBuilder {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
     private static final int SNAPSHOT_FORMAT = 1;
-    private static final int ARTIFACT_FORMAT = 3;
-    private static final String CACHE_FORMAT = "allcraft-general-compiler-v3-static-initializers";
+    private static final int ARTIFACT_FORMAT = 4;
+    private static final String CACHE_FORMAT = "allcraft-general-compiler-v4-field-initializers";
     private static final String SNAPSHOT = "revisions/current-source.json";
     private static final String STATIC_INITIALIZER_PREFIX = "allcraft$initializeAddedStatic$";
+    private static final String INSTANCE_INITIALIZER_PREFIX = "allcraft$initializeAddedInstance$";
+    private static final String INSTANCE_GETTER_PREFIX = "allcraft$getAddedInstance$";
+    private static final String INSTANCE_SETTER_PREFIX = "allcraft$setAddedInstance$";
+    private static final String INSTANCE_FLAG_PREFIX = "allcraft$initializedAddedInstance$";
     private static final Pattern PACKAGE = Pattern.compile("(?m)^\\s*package\\s+([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\s*;");
     private static final Pattern WILDCARD_IMPORT = Pattern.compile(
         "(?m)^\\s*import\\s+(?:static\\s+)?([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\.\\*\\s*;"
@@ -410,6 +416,7 @@ public final class AllcraftRevisionBuilder {
             hooks,
             entrypoints,
             compilation.staticInitializers,
+            compilation.instanceInitializers,
             compilation.cacheHit,
             compilation.elapsedMillis
         );
@@ -752,16 +759,18 @@ public final class AllcraftRevisionBuilder {
     ) throws IOException {
         long startedAt = System.nanoTime();
         List<Path> sourceFiles = sources.stream().map(sourceRoot::resolve).map(path -> path.toAbsolutePath().normalize()).sorted().toList();
-        StaticSourcePlan staticPlan = planAutomaticStaticInitializers(side, sourceRoot, sourceFiles, patchesRoot, manifest);
+        AutomaticFieldPlan fieldPlan = planAutomaticFieldInitializers(side, sourceRoot, sourceFiles, patchesRoot, manifest);
         String classPath = compileClassPath(side, patchesRoot, manifest);
-        String key = cacheKey(side, sourceFiles, staticPlan.sources, classPath);
+        String key = cacheKey(side, sourceFiles, fieldPlan.sources, classPath);
         Path cacheRoot = patchesRoot.resolve("build-cache/general").resolve(side.id);
         Path entry = cacheRoot.resolve(key);
         Path output = entry.resolve("classes");
         if (Files.isRegularFile(entry.resolve("complete"))) {
             Map<String, byte[]> cached = readClasses(output);
             if (!cached.isEmpty()) {
-                return new Compilation(cached, staticPlan.initializers, true, elapsedMillis(startedAt));
+                return new Compilation(
+                    cached, fieldPlan.staticInitializers, fieldPlan.instanceInitializers, true, elapsedMillis(startedAt)
+                );
             }
         }
 
@@ -774,7 +783,7 @@ public final class AllcraftRevisionBuilder {
         Files.createDirectories(emptySourcePath);
         List<Path> compilerSources = new ArrayList<>();
         for (Path sourceFile : sourceFiles) {
-            String transformed = staticPlan.sources.get(sourceFile);
+            String transformed = fieldPlan.sources.get(sourceFile);
             if (transformed == null) {
                 compilerSources.add(sourceFile);
                 continue;
@@ -806,10 +815,11 @@ public final class AllcraftRevisionBuilder {
         command.add("-implicit:none");
         compilerSources.forEach(path -> command.add(path.toString()));
         LOGGER.info(
-            "Compiling Allcraft {} revision from {} explicit source file(s), with {} automatic static initializer(s)",
+            "Compiling Allcraft {} revision from {} explicit source file(s), with {} automatic static and {} instance initializer(s)",
             side.id,
             sourceFiles.size(),
-            staticPlan.initializers.size()
+            fieldPlan.staticInitializers.size(),
+            fieldPlan.instanceInitializers.size()
         );
         Process process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(compilerLog.toFile()).start();
         boolean finished;
@@ -836,6 +846,12 @@ public final class AllcraftRevisionBuilder {
             deleteTree(temporary);
             throw new IOException("Compiler produced no class files for " + sourceFiles);
         }
+        classes = rewriteAutomaticInstanceFieldAccesses(side, classes, fieldPlan.instanceInitializers, patchesRoot, manifest);
+        for (Map.Entry<String, byte[]> compiled : classes.entrySet()) {
+            Path classFile = temporaryOutput.resolve(compiled.getKey());
+            Files.createDirectories(classFile.getParent());
+            Files.write(classFile, compiled.getValue());
+        }
         Files.writeString(temporary.resolve("complete"), key + System.lineSeparator(), StandardCharsets.UTF_8);
         deleteTree(entry);
         try {
@@ -843,7 +859,9 @@ public final class AllcraftRevisionBuilder {
         } catch (AtomicMoveNotSupportedException e) {
             Files.move(temporary, entry);
         }
-        return new Compilation(classes, staticPlan.initializers, false, elapsedMillis(startedAt));
+        return new Compilation(
+            classes, fieldPlan.staticInitializers, fieldPlan.instanceInitializers, false, elapsedMillis(startedAt)
+        );
     }
 
     /**
@@ -853,23 +871,27 @@ public final class AllcraftRevisionBuilder {
      * newly added initialized static field; the runtime evaluates it exactly once after redefine
      * and writes the result into the new field, including {@code static final} fields.
      */
-    private static StaticSourcePlan planAutomaticStaticInitializers(
+    private static AutomaticFieldPlan planAutomaticFieldInitializers(
         Side side, Path sourceRoot, List<Path> sourceFiles, Path patchesRoot, JsonObject manifest
     ) throws IOException {
         Map<Path, String> transformed = new LinkedHashMap<>();
-        List<StaticInitializer> initializers = new ArrayList<>();
+        List<StaticInitializer> staticInitializers = new ArrayList<>();
+        List<InstanceInitializer> instanceInitializers = new ArrayList<>();
         for (Path sourceFile : sourceFiles) {
             String source = Files.readString(sourceFile, StandardCharsets.UTF_8);
-            SourceStaticPlan plan = planSourceStaticInitializers(side, sourceFile, source, patchesRoot, manifest);
-            if (!plan.initializers.isEmpty()) {
+            SourceFieldPlan plan = planSourceFieldInitializers(side, sourceFile, source, patchesRoot, manifest);
+            if (!plan.staticInitializers.isEmpty() || !plan.instanceInitializers.isEmpty()) {
                 transformed.put(sourceFile, applyInsertions(source, plan.insertions));
-                initializers.addAll(plan.initializers);
+                staticInitializers.addAll(plan.staticInitializers);
+                instanceInitializers.addAll(plan.instanceInitializers);
             }
         }
-        return new StaticSourcePlan(Map.copyOf(transformed), List.copyOf(initializers));
+        return new AutomaticFieldPlan(
+            Map.copyOf(transformed), List.copyOf(staticInitializers), List.copyOf(instanceInitializers)
+        );
     }
 
-    private static SourceStaticPlan planSourceStaticInitializers(
+    private static SourceFieldPlan planSourceFieldInitializers(
         Side side, Path sourceFile, String source, Path patchesRoot, JsonObject manifest
     ) throws IOException {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
@@ -897,22 +919,36 @@ public final class AllcraftRevisionBuilder {
             SourcePositions positions = Trees.instance(task).getSourcePositions();
             String packageName = unit.getPackageName() == null ? "" : unit.getPackageName().toString();
             List<TextInsertion> insertions = new ArrayList<>();
-            List<StaticInitializer> initializers = new ArrayList<>();
+            List<StaticInitializer> staticInitializers = new ArrayList<>();
+            List<InstanceInitializer> instanceInitializers = new ArrayList<>();
             for (Tree declaration : unit.getTypeDecls()) {
                 if (declaration instanceof ClassTree type && !type.getSimpleName().isEmpty()) {
                     String binaryName = packageName.isEmpty()
                         ? type.getSimpleName().toString()
                         : packageName + "." + type.getSimpleName();
-                    collectStaticInitializers(
-                        side, sourceFile, source, unit, positions, type, binaryName, patchesRoot, manifest, insertions, initializers
+                    collectFieldInitializers(
+                        side,
+                        sourceFile,
+                        source,
+                        unit,
+                        positions,
+                        type,
+                        binaryName,
+                        patchesRoot,
+                        manifest,
+                        insertions,
+                        staticInitializers,
+                        instanceInitializers
                     );
                 }
             }
-            return new SourceStaticPlan(List.copyOf(insertions), List.copyOf(initializers));
+            return new SourceFieldPlan(
+                List.copyOf(insertions), List.copyOf(staticInitializers), List.copyOf(instanceInitializers)
+            );
         }
     }
 
-    private static void collectStaticInitializers(
+    private static void collectFieldInitializers(
         Side side,
         Path sourceFile,
         String source,
@@ -923,7 +959,8 @@ public final class AllcraftRevisionBuilder {
         Path patchesRoot,
         JsonObject manifest,
         List<TextInsertion> insertions,
-        List<StaticInitializer> initializers
+        List<StaticInitializer> staticInitializers,
+        List<InstanceInitializer> instanceInitializers
     ) throws IOException {
         byte[] previous = previousClassBytes(side, binaryName, patchesRoot, manifest);
         Set<String> previousFields = previous == null
@@ -963,10 +1000,99 @@ public final class AllcraftRevisionBuilder {
                             + evaluated
                             + ";\n    }\n"
                     );
-                    initializers.add(new StaticInitializer(binaryName, field.getName().toString(), methodName));
+                    staticInitializers.add(new StaticInitializer(binaryName, field.getName().toString(), methodName));
+                } else if (previous != null
+                    && !isStatic
+                    && !enumConstant
+                    && field.getInitializer() != null
+                    && !previousFields.contains(field.getName().toString())) {
+                    String fieldName = field.getName().toString();
+                    String evaluatorName = INSTANCE_INITIALIZER_PREFIX + fieldName;
+                    String getterName = INSTANCE_GETTER_PREFIX + fieldName;
+                    String setterName = INSTANCE_SETTER_PREFIX + fieldName;
+                    String flagName = INSTANCE_FLAG_PREFIX + fieldName;
+                    if (source.contains(evaluatorName)
+                        || source.contains(getterName)
+                        || source.contains(setterName)
+                        || source.contains(flagName)) {
+                        throw new IOException(
+                            sourceFile + " uses Allcraft's reserved automatic instance-initializer names for field " + fieldName
+                        );
+                    }
+                    long start = positions.getStartPosition(unit, field.getInitializer());
+                    long end = positions.getEndPosition(unit, field.getInitializer());
+                    if (start < 0L || end < start || end > source.length()) {
+                        throw new IOException("Cannot locate initializer source for " + binaryName + "." + fieldName);
+                    }
+                    String expression = source.substring((int)start, (int)end);
+                    String fieldType = field.getType().toString();
+                    String evaluated = expression.stripLeading().startsWith("{")
+                        ? "new " + fieldType + expression
+                        : "(" + fieldType + ") (" + expression + ")";
+                    methods.add(
+                        "\n    private transient volatile boolean "
+                            + flagName
+                            + ";\n"
+                            + "\n    private java.lang.Object "
+                            + evaluatorName
+                            + "() {\n        return "
+                            + evaluated
+                            + ";\n    }\n"
+                            + "\n    public final "
+                            + fieldType
+                            + " "
+                            + getterName
+                            + "() {\n"
+                            + "        if (!this."
+                            + flagName
+                            + ") {\n"
+                            + "            synchronized (this) {\n"
+                            + "                if (!this."
+                            + flagName
+                            + ") {\n"
+                            + "                    "
+                            + fieldType
+                            + " allcraft$value = ("
+                            + fieldType
+                            + ") this."
+                            + evaluatorName
+                            + "();\n"
+                            + "                    net.minecraft.allcraft.AllcraftRuntime.initializeAddedInstanceField(this, \""
+                            + binaryName
+                            + "\", \""
+                            + fieldName
+                            + "\", allcraft$value);\n"
+                            + "                    this."
+                            + flagName
+                            + " = true;\n"
+                            + "                }\n"
+                            + "            }\n"
+                            + "        }\n"
+                            + "        return this."
+                            + fieldName
+                            + ";\n"
+                            + "    }\n"
+                            + "\n    public final void "
+                            + setterName
+                            + "("
+                            + fieldType
+                            + " allcraft$value) {\n"
+                            + "        net.minecraft.allcraft.AllcraftRuntime.initializeAddedInstanceField(this, \""
+                            + binaryName
+                            + "\", \""
+                            + fieldName
+                            + "\", allcraft$value);\n"
+                            + "        this."
+                            + flagName
+                            + " = true;\n"
+                            + "    }\n"
+                    );
+                    instanceInitializers.add(
+                        new InstanceInitializer(binaryName, fieldName, evaluatorName, getterName, setterName, flagName)
+                    );
                 }
             } else if (member instanceof ClassTree nested && !nested.getSimpleName().isEmpty()) {
-                collectStaticInitializers(
+                collectFieldInitializers(
                     side,
                     sourceFile,
                     source,
@@ -977,7 +1103,8 @@ public final class AllcraftRevisionBuilder {
                     patchesRoot,
                     manifest,
                     insertions,
-                    initializers
+                    staticInitializers,
+                    instanceInitializers
                 );
             }
         }
@@ -998,11 +1125,214 @@ public final class AllcraftRevisionBuilder {
         return result.toString();
     }
 
+    /**
+     * Existing objects receive the JVM default for an instance field added by enhanced
+     * redefinition. Redirect source-level reads and writes through generated lazy accessors. A new
+     * object reaches the setter from its ordinary constructor initializer; an old object reaches
+     * the evaluator on its first read. This preserves normal source behavior without scanning the
+     * heap or pausing the game.
+     */
+    private static Map<String, byte[]> rewriteAutomaticInstanceFieldAccesses(
+        Side side,
+        Map<String, byte[]> classes,
+        List<InstanceInitializer> currentInitializers,
+        Path patchesRoot,
+        JsonObject manifest
+    ) throws IOException {
+        Map<String, ManagedInstanceField> managed = new LinkedHashMap<>();
+        for (InstanceInitializer initializer : currentInitializers) {
+            byte[] ownerBytes = classes.get(classEntry(initializer.className));
+            ManagedInstanceField field = managedInstanceField(ownerBytes, initializer);
+            if (field == null) {
+                throw new IOException(
+                    "Compiled automatic instance initializer is incomplete for "
+                        + initializer.className
+                        + "."
+                        + initializer.fieldName
+                );
+            }
+            managed.put(field.key(), field);
+        }
+
+        // A later revision can compile a different class that reads a field managed by an earlier
+        // artifact. Discover the retained accessors from the parent definition so lazy semantics
+        // remain permanent for the lifetime of that field.
+        Set<FieldReference> references = new LinkedHashSet<>();
+        for (byte[] bytes : classes.values()) {
+            for (java.lang.classfile.constantpool.PoolEntry entry : ClassFile.of().parse(bytes).constantPool()) {
+                if (entry instanceof java.lang.classfile.constantpool.FieldRefEntry field) {
+                    references.add(
+                        new FieldReference(
+                            field.owner().asInternalName(), field.name().stringValue(), field.type().stringValue()
+                        )
+                    );
+                }
+            }
+        }
+        Map<String, byte[]> parents = new HashMap<>();
+        for (FieldReference reference : references) {
+            if (managed.containsKey(reference.key())) {
+                continue;
+            }
+            String owner = reference.ownerInternal.replace('/', '.');
+            byte[] parent;
+            if (parents.containsKey(owner)) {
+                parent = parents.get(owner);
+            } else {
+                parent = previousClassBytes(side, owner, patchesRoot, manifest);
+                parents.put(owner, parent);
+            }
+            if (parent == null) {
+                continue;
+            }
+            ManagedInstanceField inherited = managedInstanceField(parent, reference);
+            if (inherited != null) {
+                managed.put(inherited.key(), inherited);
+            }
+        }
+
+        if (managed.isEmpty()) {
+            return classes;
+        }
+        Map<String, byte[]> result = new LinkedHashMap<>();
+        ClassFile classFile = ClassFile.of();
+        for (Map.Entry<String, byte[]> compiled : classes.entrySet()) {
+            ClassModel model = classFile.parse(compiled.getValue());
+            CodeTransform fieldAccess = (builder, element) -> {
+                if (element instanceof FieldInstruction instruction) {
+                    ManagedInstanceField field = managed.get(
+                        instruction.owner().asInternalName()
+                            + "\u0000"
+                            + instruction.name().stringValue()
+                            + "\u0000"
+                            + instruction.type().stringValue()
+                    );
+                    if (field != null && instruction.opcode() == Opcode.GETFIELD) {
+                        builder.invoke(
+                            Opcode.INVOKEVIRTUAL,
+                            instruction.owner().asSymbol(),
+                            field.getterName,
+                            MethodTypeDesc.ofDescriptor("()" + field.descriptor),
+                            false
+                        );
+                        return;
+                    }
+                    if (field != null && instruction.opcode() == Opcode.PUTFIELD) {
+                        builder.invoke(
+                            Opcode.INVOKEVIRTUAL,
+                            instruction.owner().asSymbol(),
+                            field.setterName,
+                            MethodTypeDesc.ofDescriptor("(" + field.descriptor + ")V"),
+                            false
+                        );
+                        return;
+                    }
+                }
+                builder.with(element);
+            };
+            ClassTransform transform = ClassTransform.transformingMethodBodies(
+                method -> {
+                    String name = method.methodName().stringValue();
+                    return !name.startsWith(INSTANCE_GETTER_PREFIX) && !name.startsWith(INSTANCE_SETTER_PREFIX);
+                },
+                fieldAccess
+            );
+            byte[] transformed = classFile.transformClass(model, transform);
+            List<java.lang.VerifyError> errors = classFile.verify(transformed);
+            if (!errors.isEmpty()) {
+                throw new IOException(
+                    "Automatic instance-field access rewrite did not verify for "
+                        + className(compiled.getKey())
+                        + ": "
+                        + errors.getFirst()
+                );
+            }
+            result.put(compiled.getKey(), transformed);
+        }
+        return Map.copyOf(result);
+    }
+
+    private static ManagedInstanceField managedInstanceField(byte[] bytes, InstanceInitializer initializer) {
+        if (bytes == null) {
+            return null;
+        }
+        ClassModel model = ClassFile.of().parse(bytes);
+        Optional<java.lang.classfile.FieldModel> declared = model.fields()
+            .stream()
+            .filter(
+                field -> field.fieldName().equalsString(initializer.fieldName)
+                    && (field.flags().flagsMask() & ClassFile.ACC_STATIC) == 0
+            )
+            .findFirst();
+        if (declared.isEmpty()) {
+            return null;
+        }
+        String descriptor = declared.get().fieldType().stringValue();
+        if (!hasInstanceMethod(model, initializer.evaluatorName, "()Ljava/lang/Object;")
+            || !hasInstanceMethod(model, initializer.getterName, "()" + descriptor)
+            || !hasInstanceMethod(model, initializer.setterName, "(" + descriptor + ")V")
+            || model.fields()
+                .stream()
+                .noneMatch(
+                    field -> field.fieldName().equalsString(initializer.flagName)
+                        && field.fieldType().equalsString("Z")
+                        && (field.flags().flagsMask() & ClassFile.ACC_STATIC) == 0
+                )) {
+            return null;
+        }
+        return new ManagedInstanceField(
+            initializer.className.replace('.', '/'),
+            initializer.fieldName,
+            descriptor,
+            initializer.getterName,
+            initializer.setterName
+        );
+    }
+
+    private static ManagedInstanceField managedInstanceField(byte[] bytes, FieldReference reference) {
+        ClassModel model = ClassFile.of().parse(bytes);
+        String getter = INSTANCE_GETTER_PREFIX + reference.fieldName;
+        String setter = INSTANCE_SETTER_PREFIX + reference.fieldName;
+        String flag = INSTANCE_FLAG_PREFIX + reference.fieldName;
+        if (model.fields()
+                .stream()
+                .noneMatch(
+                    field -> field.fieldName().equalsString(reference.fieldName)
+                        && field.fieldType().equalsString(reference.descriptor)
+                        && (field.flags().flagsMask() & ClassFile.ACC_STATIC) == 0
+                )
+            || !hasInstanceMethod(model, getter, "()" + reference.descriptor)
+            || !hasInstanceMethod(model, setter, "(" + reference.descriptor + ")V")
+            || model.fields()
+                .stream()
+                .noneMatch(
+                    field -> field.fieldName().equalsString(flag)
+                        && field.fieldType().equalsString("Z")
+                        && (field.flags().flagsMask() & ClassFile.ACC_STATIC) == 0
+                )) {
+            return null;
+        }
+        return new ManagedInstanceField(reference.ownerInternal, reference.fieldName, reference.descriptor, getter, setter);
+    }
+
+    private static boolean hasInstanceMethod(ClassModel model, String name, String descriptor) {
+        return model.methods()
+            .stream()
+            .anyMatch(
+                method -> method.methodName().equalsString(name)
+                    && method.methodType().equalsString(descriptor)
+                    && (method.flags().flagsMask() & ClassFile.ACC_STATIC) == 0
+            );
+    }
+
     private static String compileClassPath(Side side, Path patchesRoot, JsonObject manifest) throws IOException {
         List<String> values = new ArrayList<>();
         JsonArray patches = manifest.has("patches") ? manifest.getAsJsonArray("patches") : new JsonArray();
-        for (JsonElement value : patches) {
-            JsonObject patch = value.getAsJsonObject();
+        // javac resolves the first definition of a class on its classpath. Put the newest overlay
+        // first so a later source edit compiles against the selected parent revision rather than the
+        // earliest artifact that happened to introduce that class.
+        for (int index = patches.size() - 1; index >= 0; index--) {
+            JsonObject patch = patches.get(index).getAsJsonObject();
             Path artifact = patchesRoot.resolve("artifacts/" + side.id).resolve(
                 stem(patch.get("revision").getAsLong(), patch.get("patchId").getAsString()) + ".jar"
             );
@@ -1107,6 +1437,18 @@ public final class AllcraftRevisionBuilder {
             staticInitializers.add(value);
         }
         descriptor.add("staticInitializers", staticInitializers);
+        JsonArray instanceInitializers = new JsonArray();
+        for (InstanceInitializer initializer : build.instanceInitializers) {
+            JsonObject value = new JsonObject();
+            value.addProperty("class", initializer.className);
+            value.addProperty("field", initializer.fieldName);
+            value.addProperty("method", initializer.evaluatorName);
+            value.addProperty("getter", initializer.getterName);
+            value.addProperty("setter", initializer.setterName);
+            value.addProperty("flag", initializer.flagName);
+            instanceInitializers.add(value);
+        }
+        descriptor.add("instanceInitializers", instanceInitializers);
         descriptor.addProperty("sharedContract", sharedContract.digest);
         JsonObject sharedClasses = new JsonObject();
         sharedContract.classes.forEach(sharedClasses::addProperty);
@@ -1907,6 +2249,7 @@ public final class AllcraftRevisionBuilder {
         Hooks hooks,
         List<String> entrypoints,
         List<StaticInitializer> staticInitializers,
+        List<InstanceInitializer> instanceInitializers,
         boolean cacheHit,
         long compilationMillis
     ) {
@@ -1944,10 +2287,18 @@ public final class AllcraftRevisionBuilder {
     private record SharedContract(Map<String, String> classes, String digest) {
     }
 
-    private record StaticSourcePlan(Map<Path, String> sources, List<StaticInitializer> initializers) {
+    private record AutomaticFieldPlan(
+        Map<Path, String> sources,
+        List<StaticInitializer> staticInitializers,
+        List<InstanceInitializer> instanceInitializers
+    ) {
     }
 
-    private record SourceStaticPlan(List<TextInsertion> insertions, List<StaticInitializer> initializers) {
+    private record SourceFieldPlan(
+        List<TextInsertion> insertions,
+        List<StaticInitializer> staticInitializers,
+        List<InstanceInitializer> instanceInitializers
+    ) {
     }
 
     private record TextInsertion(int offset, String text) {
@@ -1956,11 +2307,39 @@ public final class AllcraftRevisionBuilder {
     public record StaticInitializer(String className, String fieldName, String methodName) {
     }
 
+    public record InstanceInitializer(
+        String className,
+        String fieldName,
+        String evaluatorName,
+        String getterName,
+        String setterName,
+        String flagName
+    ) {
+    }
+
+    private record FieldReference(String ownerInternal, String fieldName, String descriptor) {
+        private String key() {
+            return this.ownerInternal + "\u0000" + this.fieldName + "\u0000" + this.descriptor;
+        }
+    }
+
+    private record ManagedInstanceField(
+        String ownerInternal, String fieldName, String descriptor, String getterName, String setterName
+    ) {
+        private String key() {
+            return this.ownerInternal + "\u0000" + this.fieldName + "\u0000" + this.descriptor;
+        }
+    }
+
     private record Compilation(
-        Map<String, byte[]> classes, List<StaticInitializer> staticInitializers, boolean cacheHit, long elapsedMillis
+        Map<String, byte[]> classes,
+        List<StaticInitializer> staticInitializers,
+        List<InstanceInitializer> instanceInitializers,
+        boolean cacheHit,
+        long elapsedMillis
     ) {
         private static Compilation empty() {
-            return new Compilation(Map.of(), List.of(), true, 0L);
+            return new Compilation(Map.of(), List.of(), List.of(), true, 0L);
         }
     }
 

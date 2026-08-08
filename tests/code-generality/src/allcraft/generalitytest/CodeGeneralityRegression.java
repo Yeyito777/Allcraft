@@ -96,6 +96,8 @@ public final class CodeGeneralityRegression {
         commit(firstWorld, revisionOne);
         first.seal();
         require("committed-v1".equals(System.getProperty("allcraft.generality.phase")), "revision one commit hook did not run");
+        Object preexistingProbe = probeClass().getConstructor().newInstance();
+        System.clearProperty("allcraft.generality.instanceInitCount");
 
         writeVersionTwo(firstWorld.resolve("source"), "a");
         AllcraftRevisionBuilder.PreparedRevision revisionTwo = AllcraftRevisionBuilder.prepare(
@@ -133,12 +135,30 @@ public final class CodeGeneralityRegression {
             java.util.Arrays.equals((String[])probeClass().getField("addedArray").get(null), new String[]{"left", "right"}),
             "added array static final field was not initialized"
         );
+        require(revisionTwo.client().instanceInitializers().size() == 3, "added instance initializers were not discovered");
+        require(
+            "live-v2-a:ready:41:initial".equals(callLiveProbe(preexistingProbe)),
+            "existing object did not lazily receive its added instance-field initializers"
+        );
+        require(
+            "1".equals(System.getProperty("allcraft.generality.instanceInitCount")),
+            "existing-object initializer did not run exactly once"
+        );
+        probeClass().getMethod("setAddedMutable", String.class).invoke(preexistingProbe, "changed");
+        require(
+            "live-v2-a:ready:41:changed".equals(callLiveProbe(preexistingProbe)),
+            "rewritten instance-field assignment was overwritten by lazy initialization"
+        );
         require("lambda-v1".equals(callLambdaProbe()), "existing hidden lambda lost its removed implementation method");
         second.finish();
         commit(firstWorld, revisionTwo);
         second.seal();
         Object liveProbe = probeClass().getConstructor().newInstance();
-        require("live-v2-a".equals(callLiveProbe(liveProbe)), "revision two live object was not created");
+        require("live-v2-a:ready:41:initial".equals(callLiveProbe(liveProbe)), "revision two live object was not created");
+        require(
+            "2".equals(System.getProperty("allcraft.generality.instanceInitCount")),
+            "new-object initializer did not retain ordinary exactly-once semantics"
+        );
 
         // A malformed arbitrary edit must fail before an artifact is activated or a snapshot advances.
         Path broken = firstWorld.resolve("source/client/allcraft/generality/Broken.java");
@@ -197,7 +217,7 @@ public final class CodeGeneralityRegression {
         AllcraftRuntime.Transaction retired = AllcraftRuntime.stage(deletion.clientArtifactPath(), deletion.clientSha256());
         require(retired.publish().retiredClasses() >= 3, "deleted classes were not retired");
         require("v2-a:structural".equals(callProbe()), "logical retirement destroyed a still-live class definition");
-        require("live-v2-a".equals(callLiveProbe(liveProbe)), "class retirement destroyed a live object's method body");
+        require("live-v2-a:ready:41:initial".equals(callLiveProbe(liveProbe)), "class retirement destroyed a live object's method body");
         retired.finish();
         commit(firstWorld, deletion);
         retired.seal();
@@ -531,13 +551,24 @@ public final class CodeGeneralityRegression {
                 public static final String addedField = initializeAddedField();
                 public static final int addedNumber = 37;
                 public static final String[] addedArray = {"left", "right"};
+                public final java.util.Set<String> addedInstance = initializeAddedInstance();
+                public final int addedInstanceNumber = 41;
+                public String addedMutable = "initial";
                 public static String message() { return "v2-%s:" + addedField; }
-                public String liveMessage() { return "live-v2-%s"; }
+                public String liveMessage() {
+                    return "live-v2-%s:" + addedInstance.iterator().next() + ":" + addedInstanceNumber + ":" + addedMutable;
+                }
+                public void setAddedMutable(String value) { this.addedMutable = value; }
                 public static long addedMethod(long input) { return input * 2L; }
                 private static String initializeAddedField() {
                     int count = Integer.parseInt(System.getProperty("allcraft.generality.staticInitCount", "0"));
                     System.setProperty("allcraft.generality.staticInitCount", Integer.toString(count + 1));
                     return "structural";
+                }
+                private java.util.Set<String> initializeAddedInstance() {
+                    int count = Integer.parseInt(System.getProperty("allcraft.generality.instanceInitCount", "0"));
+                    System.setProperty("allcraft.generality.instanceInitCount", Integer.toString(count + 1));
+                    return java.util.Set.of("ready");
                 }
             }
             """.formatted(world, world),
@@ -597,6 +628,7 @@ public final class CodeGeneralityRegression {
                 }
                 public static void allcraftMigrate(MigrationContext context) {
                     Probe.value = 999;
+                    if (new Probe().addedInstance.isEmpty()) throw new AssertionError("retained instance accessor failed");
                     throw new IllegalStateException("intentional migration failure");
                 }
                 public static void allcraftCommit(MigrationContext context) { }
